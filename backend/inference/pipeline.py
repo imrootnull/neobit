@@ -551,8 +551,15 @@ class AnalyticsWorker:
         NOTE: face_detection and epp_detection are excluded here — they run
         real inference (Haar cascade / HSV color analysis) in _process_frame.
         """
-        # Analytics with real implementations — never simulate
-        REAL_ANALYTICS = {"face_detection", "epp_detection"}
+        # Analytics with real frame implementations — never simulate on offline cameras
+        # All of these require an actual camera frame to produce meaningful results
+        REAL_ANALYTICS = {
+            "face_detection",     # Haar cascade — needs real frame
+            "epp_detection",      # PPE model — needs real frame
+            "fall_detection",     # Pose estimation — needs real frame
+            "person_detection",   # YOLO — needs real frame
+            "vehicle_detection",  # YOLO — needs real frame
+        }
 
         for analytic_key, config in enabled.items():
             if analytic_key in REAL_ANALYTICS:
