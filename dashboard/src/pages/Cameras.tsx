@@ -761,14 +761,26 @@ function CameraModal({ camera, initialData, onClose, onSave }: {
   onClose: () => void;
   onSave: () => void;
 }) {
+  // Normalize to nearest valid preset value so CardSelect always shows selection
+  const normFps = () => {
+    const raw = camera?.fps ?? 0;
+    const validFps = [0, 5, 10, 15, 25, 30];
+    return validFps.reduce((a, b) => Math.abs(b - raw) < Math.abs(a - raw) ? b : a);
+  };
+  const normSkip = () => {
+    const raw = camera?.frame_skip ?? 3;
+    const validSkip = [1, 2, 3, 5, 8, 15];
+    return validSkip.reduce((a, b) => Math.abs(b - raw) < Math.abs(a - raw) ? b : a);
+  };
+
   const [form, setForm] = useState<CameraForm>({
     name:          camera?.name      || initialData?.name     || '',
     rtsp_url:      camera?.rtsp_url  || initialData?.rtsp_url || '',
     location:      camera?.location  || initialData?.location || '',
-    frame_skip:    camera?.frame_skip    ?? 3,
+    frame_skip:    normSkip(),
     resolution_w:  camera?.resolution_w  ?? 0,
     resolution_h:  camera?.resolution_h  ?? 0,
-    fps:           camera?.fps           ?? 0,
+    fps:           normFps(),
     audio_enabled: camera?.audio_enabled ?? false,
   });
   const [saving, setSaving] = useState(false);
@@ -784,6 +796,8 @@ function CameraModal({ camera, initialData, onClose, onSave }: {
       } else {
         await apiPost('/api/cameras/', form);
       }
+      // Wait briefly for stream manager to apply new FPS before closing
+      await new Promise(r => setTimeout(r, 400));
       onSave();
     } catch (e: any) {
       alert('Error: ' + e.message);
