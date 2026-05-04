@@ -120,16 +120,17 @@ def _random_plate() -> str:
 
 @dataclass
 class AnalyticsWorker:
-    camera_id: int
+    camera_id:        int
     analytics_config: dict
-    event_bus: EventBus
-    loop: asyncio.AbstractEventLoop
+    event_bus:        EventBus
+    loop:             asyncio.AbstractEventLoop
 
-    thread: Optional[threading.Thread] = field(default=None, repr=False)
-    running: bool = False
-    _last_event: dict = field(default_factory=dict, repr=False)
-    _detector: Optional[YOLODetector] = field(default=None, repr=False)
-    _fall_detector: Optional[FallDetector] = field(default=None, repr=False)
+    thread:           Optional[threading.Thread] = field(default=None, repr=False)
+    running:          bool = False
+    _last_event:      dict = field(default_factory=dict, repr=False)
+    _detector:        Optional[YOLODetector] = field(default=None, repr=False)
+    _fall_detector:   Optional[FallDetector] = field(default=None, repr=False)
+    _face_cascade:    object = field(default=None, repr=False)   # cv2.CascadeClassifier
 
     def start(self):
         self.running = True
@@ -204,30 +205,239 @@ class AnalyticsWorker:
                 time.sleep(2.0)  # check every 2s
 
     def _process_frame(self, frame, enabled: dict[str, dict]):
-        """Run YOLO + Fall detection on a real frame, draw bboxes, write annotated frame, fire events."""
+        """Run YOLO + Fall + Face + EPP detection on a real frame."""
         working_frame = frame.copy()
+        person_detections: list[dict] = []
 
         # ── General YOLO (persons, vehicles, etc.) ────────────────────────────
         yolo_analytics = {k: v for k, v in enabled.items() if k in YOLO_ANALYTICS}
-        if yolo_analytics:
+        if yolo_analytics or "epp_detection" in enabled:
+            # Always need YOLO if EPP is active (we need person bboxes)
+            run_analytics = yolo_analytics.copy()
+            if "epp_detection" in enabled and "person_detection" not in run_analytics:
+                run_analytics["person_detection"] = enabled.get("person_detection", {})
             if self._detector is None:
-                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.55)  # raised from 0.45
-            working_frame, detections = self._detector.detect(working_frame, yolo_analytics, draw=True)
+                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.55)
+            working_frame, detections = self._detector.detect(working_frame, run_analytics, draw=True)
+            person_detections = [d for d in detections if d["class"] == "person"]
             self._evaluate_detections(detections, yolo_analytics)
+
+        # ── EPP detection (color analysis per person bbox) ───────────────────
+        if "epp_detection" in enabled and person_detections:
+            self._run_epp_detection(working_frame, person_detections, enabled["epp_detection"])
 
         # ── Fall detection (pose estimation) ──────────────────────────────────
         if "fall_detection" in enabled:
             if self._fall_detector is None:
-                self._fall_detector = FallDetector("yolov8n-pose.pt", "cpu", 0.50)  # raised from 0.35
+                self._fall_detector = FallDetector("yolov8n-pose.pt", "cpu", 0.50)
             fall_cfg = enabled["fall_detection"]
             working_frame, falls = self._fall_detector.detect(working_frame, fall_cfg, draw=True)
             self._evaluate_falls(falls, fall_cfg)
 
-        # Write final annotated frame to stream buffer
+        # ── Face detection (Haar cascade) ────────────────────────────────
+        if "face_detection" in enabled:
+            self._run_face_detection(working_frame, enabled["face_detection"])
+
+        # Commit annotated frame + clip buffer
         stream_manager.set_annotated_frame(self.camera_id, working_frame)
         stream = stream_manager.streams.get(self.camera_id)
         if stream is not None:
             stream.clip_buffer.append(working_frame)
+
+    # ── EPP detection helpers ──────────────────────────────────────────
+
+    def _run_epp_detection(self, frame, persons: list[dict], config: dict):
+        """
+        Real EPP detection using HSV color analysis.
+        Analyzes head/torso/feet regions of each detected person.
+        Draws status overlay on the frame and fires event if violations found.
+        """
+        import cv2 as _cv2, numpy as _np
+
+        required = config.get("required_ppe", ["helmet", "vest"])
+        h_frame, w_frame = frame.shape[:2]
+
+        total_violations: list[str] = []
+        total_ok:         list[str] = []
+
+        for det in persons:
+            x1, y1, x2, y2 = det["bbox"]
+            ph = max(y2 - y1, 1)
+
+            # ── Region crops ────────────────────────────────────
+            head_y1  = max(y1, 0)
+            head_y2  = min(y1 + ph // 4, h_frame)          # top 25%
+            torso_y1 = head_y2
+            torso_y2 = min(y1 + 3 * ph // 4, h_frame)      # 25-75%
+            feet_y1  = torso_y2
+            feet_y2  = min(y2, h_frame)                      # 75-100%
+
+            bx1 = max(x1, 0)
+            bx2 = min(x2, w_frame)
+
+            head_crop  = frame[head_y1:head_y2,  bx1:bx2]
+            torso_crop = frame[torso_y1:torso_y2, bx1:bx2]
+            feet_crop  = frame[feet_y1:feet_y2,  bx1:bx2]
+
+            person_ok      : list[str] = []
+            person_missing : list[str] = []
+
+            # Helmet check (top 25%)
+            if "helmet" in required:
+                if head_crop.size > 0 and self._has_ppe_color(head_crop, "helmet"):
+                    person_ok.append("casco")
+                    self._draw_ppe_badge(frame, x1, head_y1, x2, head_y2, "Casco ✓", (0, 210, 80))
+                else:
+                    person_missing.append("casco")
+                    self._draw_ppe_badge(frame, x1, head_y1, x2, head_y2, "Sin casco", (0, 50, 220))
+
+            # Vest check (torso 25-75%)
+            if "vest" in required:
+                if torso_crop.size > 0 and self._has_ppe_color(torso_crop, "vest"):
+                    person_ok.append("chaleco")
+                    self._draw_ppe_badge(frame, x1, torso_y1, x2, torso_y2, "Chaleco ✓", (0, 210, 80))
+                else:
+                    person_missing.append("chaleco")
+                    self._draw_ppe_badge(frame, x1, torso_y1, x2, torso_y2, "Sin chaleco", (0, 50, 220))
+
+            # Boots check (bottom 25%)
+            if "boots" in required:
+                if feet_crop.size > 0 and self._has_ppe_color(feet_crop, "boots"):
+                    person_ok.append("botas")
+                else:
+                    person_missing.append("botas")
+
+            total_violations.extend(person_missing)
+            total_ok.extend(person_ok)
+
+            # Status bar below bounding box
+            status_color = (0, 200, 70) if not person_missing else (0, 60, 230)
+            status_text  = "EPP completo" if not person_missing else f"Falta: {', '.join(person_missing)}"
+            label_y = min(y2 + 16, h_frame - 4)
+            import cv2 as _cv2
+            _cv2.putText(frame, status_text, (x1 + 2, label_y),
+                         _cv2.FONT_HERSHEY_DUPLEX, 0.42, status_color, 1, _cv2.LINE_AA)
+
+        # Fire event if any violations detected
+        if total_violations and self._rate_limit_ok("epp_detection", config):
+            min_conf = config.get("confidence", 0.70)
+            confidence = round(min(0.96, 0.70 + len(total_violations) * 0.06), 2)
+            if confidence >= min_conf:
+                desc = (
+                    f"{len(set(total_violations))} EPP faltante(s): {', '.join(sorted(set(total_violations)))}"
+                )
+                self._emit_event("epp_detection", confidence, desc, config)
+
+    @staticmethod
+    def _has_ppe_color(crop, ppe_type: str) -> bool:
+        """
+        Check if a crop region contains PPE-typical colors using HSV analysis.
+        Returns True if the dominant color matches the expected PPE item.
+        """
+        import cv2 as _cv2, numpy as _np
+        if crop is None or crop.size == 0:
+            return False
+
+        hsv = _cv2.cvtColor(crop, _cv2.COLOR_BGR2HSV)
+
+        if ppe_type == "helmet":
+            # Hard hats: yellow, orange, white, red, blue
+            masks = [
+                _cv2.inRange(hsv, _np.array([15,  120, 120]), _np.array([35,  255, 255])),  # yellow
+                _cv2.inRange(hsv, _np.array([ 5,  140, 120]), _np.array([15,  255, 255])),  # orange
+                _cv2.inRange(hsv, _np.array([ 0,    0, 200]), _np.array([180,  50, 255])),  # white
+                _cv2.inRange(hsv, _np.array([100, 100, 100]), _np.array([130, 255, 255])),  # blue
+                _cv2.inRange(hsv, _np.array([170, 120, 100]), _np.array([180, 255, 255])),  # red-hi
+                _cv2.inRange(hsv, _np.array([  0, 120, 100]), _np.array([  5, 255, 255])),  # red-lo
+            ]
+            threshold = 0.15  # 15% of crop must match
+
+        elif ppe_type == "vest":
+            # Hi-vis vests: fluorescent orange, yellow, lime-green
+            masks = [
+                _cv2.inRange(hsv, _np.array([15, 150, 150]), _np.array([35, 255, 255])),   # yellow-orange
+                _cv2.inRange(hsv, _np.array([ 5, 160, 140]), _np.array([15, 255, 255])),   # orange
+                _cv2.inRange(hsv, _np.array([35, 130, 130]), _np.array([75, 255, 255])),   # lime-green
+            ]
+            threshold = 0.20
+
+        elif ppe_type == "boots":
+            # Safety boots: black, dark brown, high-vis yellow at feet
+            masks = [
+                _cv2.inRange(hsv, _np.array([0, 0,   0]),   _np.array([180, 80,  70])),    # black/dark
+                _cv2.inRange(hsv, _np.array([5, 80,  40]),  _np.array([25,  200, 120])),   # dark brown
+            ]
+            threshold = 0.25
+        else:
+            return False
+
+        total_pixels = crop.shape[0] * crop.shape[1]
+        matched = sum(_np.count_nonzero(m) for m in masks)
+        return (matched / total_pixels) >= threshold
+
+    @staticmethod
+    def _draw_ppe_badge(frame, x1: int, y1: int, x2: int, y2: int,
+                        label: str, color: tuple):
+        """Draw a thin colored border + small label for a body region."""
+        import cv2 as _cv2
+        # Thin region border
+        _cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+        # Small label inside region top-left
+        label_y = min(y1 + 11, y2 - 2)
+        _cv2.putText(frame, label, (x1 + 2, label_y),
+                     _cv2.FONT_HERSHEY_DUPLEX, 0.36, color, 1, _cv2.LINE_AA)
+
+
+    def _run_face_detection(self, frame, config: dict):
+        """Detect faces with OpenCV Haar cascade. Draws boxes and fires event if found."""
+        import cv2 as _cv2
+        if not self._rate_limit_ok("face_detection", config):
+            return
+
+        # Lazy init of Haar cascade (built into OpenCV, no download needed)
+        if self._face_cascade is None:
+            cascade_path = _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            self._face_cascade = _cv2.CascadeClassifier(cascade_path)
+
+        gray  = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
+        # Equalize for better detection in dim conditions
+        gray  = _cv2.equalizeHist(gray)
+        faces = self._face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(40, 40),
+        )
+
+        if len(faces) == 0:
+            return  # no face found — no event
+
+        min_conf = config.get("confidence", 0.65)
+        # Haar cascade doesn't give confidence — synthesize based on face size
+        h_frame, w_frame = frame.shape[:2]
+        largest = max(faces, key=lambda f: f[2] * f[3])   # biggest face
+        fx, fy, fw, fh = largest
+        face_area_ratio = (fw * fh) / (w_frame * h_frame)
+        # confidence proportional to face size: 0.1 area = 0.90 conf
+        confidence = round(min(0.95, 0.60 + face_area_ratio * 3.0), 2)
+
+        if confidence < min_conf:
+            return
+
+        # Draw all detected faces
+        for (x, y, w, h) in faces:
+            _cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 220, 180), 2)
+            _cv2.rectangle(frame, (x, y - 20), (x + w, y), (0, 220, 180), -1)
+            _cv2.putText(frame, f"Rostro {confidence:.0%}",
+                         (x + 3, y - 4),
+                         _cv2.FONT_HERSHEY_DUPLEX, 0.42, (10, 10, 10), 1, _cv2.LINE_AA)
+
+        desc = (
+            f"{len(faces)} rostro(s) detectado(s)" if len(faces) > 1
+            else "Rostro detectado"
+        )
+        self._emit_event("face_detection", confidence, desc, config)
+
 
     def _evaluate_detections(self, detections: list, enabled: dict[str, dict]):
         """Turn YOLO detections into analytic events."""
@@ -293,8 +503,15 @@ class AnalyticsWorker:
         """
         Development simulator — probabilistic event generation.
         Fires events based on configured probability per analytic.
+        NOTE: face_detection and epp_detection are excluded here — they run
+        real inference (Haar cascade / HSV color analysis) in _process_frame.
         """
+        # Analytics with real implementations — never simulate
+        REAL_ANALYTICS = {"face_detection", "epp_detection"}
+
         for analytic_key, config in enabled.items():
+            if analytic_key in REAL_ANALYTICS:
+                continue
             if not self._rate_limit_ok(analytic_key, config):
                 continue
 
@@ -305,6 +522,7 @@ class AnalyticsWorker:
 
                 if confidence >= min_conf:
                     self._emit_event(analytic_key, confidence, None, config)
+
 
     def _emit_event(self, analytic_key: str, confidence: float,
                     description: Optional[str], config: dict):
