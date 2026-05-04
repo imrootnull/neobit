@@ -2,12 +2,13 @@ import { NavLink } from 'react-router-dom';
 import { useWS } from '../context/WSContext';
 import {
   LayoutGrid, Search, Bell, Settings, Camera,
-  Activity, Shield, Cpu, Radio, HardDrive
+  Activity, Shield, Cpu, Radio, HardDrive, Film
 } from 'lucide-react';
 
 const navItems = [
   { to: '/',           icon: LayoutGrid, label: 'Monitor'      },
   { to: '/events',     icon: Bell,       label: 'Eventos'      },
+  { to: '/playback',   icon: Film,       label: 'Reproducción' },
   { to: '/search',     icon: Search,     label: 'Busqueda IA'  },
   { to: '/analytics',  icon: Activity,   label: 'Analiticas'   },
   { to: '/cameras',    icon: Camera,     label: 'Camaras'      },
@@ -59,7 +60,7 @@ export default function Sidebar() {
       {/* Navigation */}
       <nav className="sidebar-nav">
         <div className="nav-section">Principal</div>
-        {navItems.slice(0, 3).map(({ to, icon: Icon, label }) => (
+        {navItems.slice(0, 4).map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
             to={to}
@@ -71,7 +72,7 @@ export default function Sidebar() {
         ))}
 
         <div className="nav-section">Configuración</div>
-        {navItems.slice(3).map(({ to, icon: Icon, label }) => (
+        {navItems.slice(4).map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
             to={to}

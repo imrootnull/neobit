@@ -12,6 +12,7 @@ import { lazy, Suspense } from 'react';
 const Events    = lazy(() => import('./pages/Events'));
 const Analytics = lazy(() => import('./pages/Analytics'));
 const Recording = lazy(() => import('./pages/Recording'));
+const Playback  = lazy(() => import('./pages/Playback'));
 
 function PageLoader() {
   return (
@@ -40,6 +41,7 @@ export default function App() {
                 <Route path="/"           element={<Monitor />} />
                 <Route path="/events"     element={<Events />} />
                 <Route path="/search"     element={<Search />} />
+                <Route path="/playback"   element={<Playback />} />
                 <Route path="/analytics"  element={<Analytics />} />
                 <Route path="/cameras"    element={<Cameras />} />
                 <Route path="/recording"  element={<Recording />} />
