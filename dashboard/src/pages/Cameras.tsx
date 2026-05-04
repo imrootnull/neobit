@@ -592,7 +592,7 @@ function CameraCard({ camera, connected, fps, onEdit, onDelete, onConfig }) {
               const Icon = ANALYTIC_ICONS[key];
               const opt  = ANALYTICS_OPTIONS.find(o => o.key === key);
               if (!Icon) return null;
-              return (
+return (
                 <span key={key} title={opt?.label || key} style={{
                   display: 'flex', alignItems: 'center', gap: 4,
                   padding: '3px 8px', borderRadius: 6, fontSize: 11,
@@ -614,24 +614,144 @@ function CameraCard({ camera, connected, fps, onEdit, onDelete, onConfig }) {
 
 // ─── Camera Modal ─────────────────────────────────────────────────────────────
 
-function CameraModal({ camera, initialData, onClose, onSave }) {
-  const [form, setForm] = useState({
-    name:             camera?.name             || initialData?.name     || '',
-    rtsp_url:         camera?.rtsp_url         || initialData?.rtsp_url || '',
-    location:         camera?.location         || initialData?.location || '',
-    frame_skip:       camera?.frame_skip       ?? 3,
-    resolution_w:     camera?.resolution_w     ?? 0,
-    resolution_h:     camera?.resolution_h     ?? 0,
-    fps:              camera?.fps              ?? 0,
-    analytics_config: camera?.analytics_config || {},
+interface CameraForm {
+  name: string;
+  rtsp_url: string;
+  location: string;
+  frame_skip: number;
+  resolution_w: number;
+  resolution_h: number;
+  fps: number;
+  audio_enabled: boolean;
+}
+
+// Resolution presets (in megapixels for display, w×h for API)
+const RESOLUTION_PRESETS = [
+  { label: 'Original',  sub: 'Sin reducción',      w: 0,    h: 0,    mp: null },
+  { label: '4K',        sub: '8 MP — alta carga',  w: 3840, h: 2160, mp: 8   },
+  { label: '2K',        sub: '4 MP',               w: 2560, h: 1440, mp: 4   },
+  { label: '1080p',     sub: '2 MP — Full HD',     w: 1920, h: 1080, mp: 2   },
+  { label: '720p',      sub: '1 MP — recomendado', w: 1280, h: 720,  mp: 1   },
+  { label: '480p',      sub: '0.3 MP — bajo CPU',  w: 854,  h: 480,  mp: 0.3 },
+  { label: '360p',      sub: 'Mínimo',             w: 640,  h: 360,  mp: 0.2 },
+] as const;
+
+const FPS_PRESETS = [
+  { label: 'Original', sub: 'Sin límite',          value: 0  },
+  { label: '30 FPS',   sub: 'Máximo fluido',        value: 30 },
+  { label: '25 FPS',   sub: 'Estándar',             value: 25 },
+  { label: '15 FPS',   sub: 'Recomendado',          value: 15 },
+  { label: '10 FPS',   sub: 'Bajo consumo',         value: 10 },
+  { label: '5 FPS',    sub: 'Mínimo',               value: 5  },
+] as const;
+
+const AI_SKIP_PRESETS = [
+  { label: 'Máximo',    sub: '~25 FPS IA',   value: 1  },
+  { label: 'Alto',      sub: '~12 FPS IA',   value: 2  },
+  { label: 'Normal',    sub: '~8 FPS IA',    value: 3  },
+  { label: 'Reducido',  sub: '~5 FPS IA',    value: 5  },
+  { label: 'Bajo',      sub: '~3 FPS IA',    value: 8  },
+  { label: 'Mínimo',    sub: '~2 FPS IA',    value: 15 },
+] as const;
+
+// ── Reusable card-select component ────────────────────────────────────────────
+interface CardSelectOption {
+  label: string;
+  sub: string;
+  value: number;
+  mp?: number | null;
+}
+
+function CardSelect({
+  options,
+  value,
+  onChange,
+  accent = 'var(--accent-blue)',
+}: {
+  options: readonly CardSelectOption[];
+  value: number;
+  onChange: (v: number) => void;
+  accent?: string;
+}) {
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: `repeat(auto-fill, minmax(88px, 1fr))`,
+      gap: 6,
+    }}>
+      {options.map(opt => {
+        const active = opt.value === value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '8px 6px',
+              borderRadius: 8,
+              border: `1.5px solid ${active ? accent : 'var(--border)'}`,
+              background: active
+                ? `color-mix(in srgb, ${accent} 12%, transparent)`
+                : 'var(--bg-card)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+              gap: 2,
+              boxShadow: active ? `0 0 0 1px ${accent}40` : 'none',
+            }}
+          >
+            <span style={{
+              fontSize: 12, fontWeight: 700,
+              color: active ? accent : 'var(--text-primary)',
+            }}>
+              {opt.label}
+            </span>
+            <span style={{
+              fontSize: 10, color: 'var(--text-muted)',
+              textAlign: 'center', lineHeight: 1.2,
+            }}>
+              {opt.sub}
+            </span>
+            {'mp' in opt && opt.mp != null && (
+              <span style={{
+                fontSize: 9, fontWeight: 600,
+                color: active ? accent : 'var(--text-muted)',
+                marginTop: 1,
+              }}>
+                {opt.mp}MP
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Main modal ────────────────────────────────────────────────────────────────
+function CameraModal({ camera, initialData, onClose, onSave }: {
+  camera: any;
+  initialData: any;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const [form, setForm] = useState<CameraForm>({
+    name:          camera?.name      || initialData?.name     || '',
+    rtsp_url:      camera?.rtsp_url  || initialData?.rtsp_url || '',
+    location:      camera?.location  || initialData?.location || '',
+    frame_skip:    camera?.frame_skip    ?? 3,
+    resolution_w:  camera?.resolution_w  ?? 0,
+    resolution_h:  camera?.resolution_h  ?? 0,
+    fps:           camera?.fps           ?? 0,
+    audio_enabled: camera?.audio_enabled ?? false,
   });
   const [saving, setSaving] = useState(false);
 
-  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
-  const toggleAnalytic = (key) => setForm(p => ({
-    ...p,
-    analytics_config: { ...p.analytics_config, [key]: !p.analytics_config[key] },
-  }));
+  const set = <K extends keyof CameraForm>(k: K, v: CameraForm[K]) =>
+    setForm(p => ({ ...p, [k]: v }));
 
   const handleSave = async () => {
     setSaving(true);
@@ -642,144 +762,183 @@ function CameraModal({ camera, initialData, onClose, onSave }) {
         await apiPost('/api/cameras/', form);
       }
       onSave();
-    } catch (e) {
+    } catch (e: any) {
       alert('Error: ' + e.message);
     } finally {
       setSaving(false);
     }
   };
 
+  // derive current resolution preset value
+  const resValue = form.resolution_w === 0 ? 0 : form.resolution_w;
+  const resOptions: CardSelectOption[] = RESOLUTION_PRESETS.map(p => ({
+    label: p.label,
+    sub: p.sub,
+    value: p.w,
+    mp: p.mp ?? null,
+  }));
+
+  const fpsOptions: CardSelectOption[] = FPS_PRESETS.map(p => ({
+    label: p.label,
+    sub: p.sub,
+    value: p.value,
+  }));
+
+  const aiOptions: CardSelectOption[] = AI_SKIP_PRESETS.map(p => ({
+    label: p.label,
+    sub: p.sub,
+    value: p.value,
+  }));
+
+  const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
+    <div style={{
+      padding: '14px 16px',
+      borderRadius: 10,
+      border: '1px solid var(--border)',
+      background: 'rgba(255,255,255,0.02)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+    }}>
+      <span style={{
+        fontSize: 11, fontWeight: 700, letterSpacing: '0.06em',
+        textTransform: 'uppercase', color: 'var(--text-muted)',
+      }}>
+        {title}
+      </span>
+      {children}
+    </div>
+  );
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" style={{ maxHeight: '90vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
+      <div
+        className="modal"
+        style={{ maxWidth: 560, maxHeight: '92vh', overflowY: 'auto' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
         <div className="modal-header">
-          <span className="modal-title">
+          <span className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Camera size={16} style={{ color: 'var(--accent-blue)' }} />
             {camera ? 'Editar cámara' : 'Nueva cámara'}
           </span>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><X size={16} /></button>
         </div>
 
         <div className="modal-body">
+          {/* ONVIF detected banner */}
           {initialData?.manufacturer && (
             <div style={{
-              padding: '8px 12px', marginBottom: 12,
+              padding: '8px 12px',
               background: 'rgba(16,185,129,0.08)',
-              border: '1px solid rgba(16,185,129,0.15)',
-              borderRadius: 6, fontSize: 12,
+              border: '1px solid rgba(16,185,129,0.18)',
+              borderRadius: 8, fontSize: 12,
               display: 'flex', gap: 8, alignItems: 'center',
             }}>
-              <Check size={13} style={{ color: 'var(--accent-green)' }} />
-              Cámara detectada: {initialData.manufacturer} {initialData.model}
+              <Check size={13} style={{ color: 'var(--accent-green)', flexShrink: 0 }} />
+              Detectado: <strong>{initialData.manufacturer} {initialData.model}</strong>
             </div>
           )}
 
-          <div className="form-group">
-            <label className="form-label">Nombre</label>
-            <input id="cam-name" className="form-input"
-              value={form.name}
-              onChange={e => set('name', e.target.value)}
-              placeholder="Entrada principal" />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">URL RTSP</label>
-            <input id="cam-rtsp" className="form-input"
-              value={form.rtsp_url}
-              onChange={e => set('rtsp_url', e.target.value)}
-              placeholder="rtsp://usuario:pass@192.168.1.x:554/stream" />
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <div className="form-group">
-              <label className="form-label">Ubicacion</label>
-              <input className="form-input"
-                value={form.location}
-                onChange={e => set('location', e.target.value)}
-                placeholder="Planta baja" />
-            </div>
-            <div className="form-group">
-              <label className="form-label">FPS de procesamiento IA</label>
-              <select className="form-select" value={form.frame_skip}
-                onChange={e => set('frame_skip', +e.target.value)}>
-                <option value={1}>Maximo (~25 FPS) — mayor CPU</option>
-                <option value={2}>Alto (~12 FPS)</option>
-                <option value={3}>Normal (~8 FPS) — recomendado</option>
-                <option value={5}>Reducido (~5 FPS)</option>
-                <option value={8}>Bajo (~3 FPS) — menor CPU</option>
-                <option value={15}>Minimo (~2 FPS) — modo ahorro</option>
-              </select>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                Controla cada cuantos frames del stream procesa la IA. Menor FPS = menos carga de CPU.
-              </div>
-            </div>
-          </div>
-
-          {/* Resolution + FPS cap */}
-          <div style={{
-            padding: '12px 14px', borderRadius: 10,
-            border: '1px solid var(--border)',
-            background: 'var(--bg-body)',
-            marginBottom: 4,
-          }}>
-            <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10, color: 'var(--text-muted)' }}>
-              Calidad del stream en este sistema
-            </div>
+          {/* ── Identidad ── */}
+          <Section title="Identidad">
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">Resolucion maxima</label>
-                <select className="form-select"
-                  value={`${form.resolution_w}x${form.resolution_h}`}
-                  onChange={e => {
-                    const [w, h] = e.target.value.split('x').map(Number);
-                    set('resolution_w', w); set('resolution_h', h);
-                  }}>
-                  <option value="0x0">Original (sin limite)</option>
-                  <option value="1920x1080">1080p — Full HD</option>
-                  <option value="1280x720">720p — recomendado</option>
-                  <option value="854x480">480p — bajo consumo</option>
-                  <option value="640x360">360p — minimo</option>
-                </select>
+                <label className="form-label">Nombre de cámara</label>
+                <input
+                  id="cam-name"
+                  className="form-input"
+                  value={form.name}
+                  onChange={e => set('name', e.target.value)}
+                  placeholder="Entrada principal"
+                />
               </div>
               <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">FPS maximo del stream</label>
-                <select className="form-select" value={form.fps}
-                  onChange={e => set('fps', +e.target.value)}>
-                  <option value={0}>Sin limite (original)</option>
-                  <option value={25}>25 FPS</option>
-                  <option value={15}>15 FPS — recomendado</option>
-                  <option value={10}>10 FPS</option>
-                  <option value={5}>5 FPS — bajo consumo</option>
-                </select>
+                <label className="form-label">Ubicación</label>
+                <input
+                  className="form-input"
+                  value={form.location}
+                  onChange={e => set('location', e.target.value)}
+                  placeholder="Planta baja, Estacionamiento…"
+                />
               </div>
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-              La camara seguira transmitiendo a su resolucion original — el sistema redimensiona y
-              limita en software sin afectar la configuracion de la camara.
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">URL RTSP</label>
+              <input
+                id="cam-rtsp"
+                className="form-input"
+                value={form.rtsp_url}
+                onChange={e => set('rtsp_url', e.target.value)}
+                placeholder="rtsp://usuario:contraseña@192.168.x.x:554/stream"
+                style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }}
+              />
             </div>
-          </div>
+          </Section>
 
-          <div>
-            <label className="form-label" style={{ display: 'block', marginBottom: 8 }}>
-              Analíticas IA
+          {/* ── Resolución ── */}
+          <Section title="Resolución máxima">
+            <CardSelect
+              options={resOptions}
+              value={resValue}
+              onChange={w => {
+                const preset = RESOLUTION_PRESETS.find(p => p.w === w)!;
+                set('resolution_w', preset.w);
+                set('resolution_h', preset.h);
+              }}
+              accent="var(--accent-blue)"
+            />
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+              El sistema redimensiona en software — la cámara sigue transmitiendo a su resolución nativa.
+            </p>
+          </Section>
+
+          {/* ── FPS del stream ── */}
+          <Section title="FPS del stream (límite)">
+            <CardSelect
+              options={fpsOptions}
+              value={form.fps}
+              onChange={v => set('fps', v)}
+              accent="var(--accent-cyan)"
+            />
+          </Section>
+
+          {/* ── Carga de IA ── */}
+          <Section title="Carga de IA (procesamiento)">
+            <CardSelect
+              options={aiOptions}
+              value={form.frame_skip}
+              onChange={v => set('frame_skip', v)}
+              accent="var(--accent-purple)"
+            />
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+              Controla cada cuántos frames analiza la IA. Menor = más detecciones, más CPU.
+            </p>
+          </Section>
+
+          {/* ── Audio ── */}
+          <Section title="Audio">
+            <label
+              className="toggle"
+              style={{ alignItems: 'center', gap: 12, cursor: 'pointer' }}
+            >
+              <input
+                type="checkbox"
+                checked={form.audio_enabled}
+                onChange={e => set('audio_enabled', e.target.checked)}
+              />
+              <div className="toggle-track"><div className="toggle-thumb" /></div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>
+                  Audio habilitado
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  La cámara debe tener micrófono integrado o conectado
+                </div>
+              </div>
             </label>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-              {ANALYTICS_OPTIONS.map(opt => {
-                const Icon = ANALYTIC_ICONS[opt.key] || Camera;
-                return (
-                  <label key={opt.key} className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={!!form.analytics_config[opt.key]}
-                      onChange={() => toggleAnalytic(opt.key)}
-                    />
-                    <div className="toggle-track"><div className="toggle-thumb" /></div>
-                    <Icon size={13} style={{ opacity: 0.7 }} />
-                    <span style={{ fontSize: 13 }}>{opt.label}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
+          </Section>
         </div>
 
         <div className="modal-footer">
@@ -790,10 +949,11 @@ function CameraModal({ camera, initialData, onClose, onSave }) {
             onClick={handleSave}
             disabled={saving || !form.name || !form.rtsp_url}
           >
-            {saving ? 'Guardando...' : <><Check size={14} /> Guardar</>}
+            {saving ? 'Guardando…' : <><Check size={14} /> Guardar</>}
           </button>
         </div>
       </div>
     </div>
   );
 }
+
