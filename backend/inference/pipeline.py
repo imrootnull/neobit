@@ -240,8 +240,10 @@ class AnalyticsWorker:
             self._evaluate_falls(falls, fall_cfg)
 
         # ── Face detection (Haar cascade) ────────────────────────────────
-        if "face_detection" in enabled:
-            self._run_face_detection(working_frame, enabled["face_detection"])
+        # Only run if YOLO already detected at least one person in this frame
+        # (cross-validation: no person bbox = no face event, kills false positives)
+        if "face_detection" in enabled and person_detections:
+            self._run_face_detection(working_frame, enabled["face_detection"], person_detections)
 
         # Commit annotated frame + clip buffer
         stream_manager.set_annotated_frame(self.camera_id, working_frame)
@@ -293,43 +295,71 @@ class AnalyticsWorker:
 
 
 
-    def _run_face_detection(self, frame, config: dict):
-        """Detect faces with OpenCV Haar cascade. Draws boxes and fires event if found."""
+    def _run_face_detection(self, frame, config: dict, person_detections: list | None = None):
+        """
+        Detect faces with OpenCV Haar cascade.
+        Cross-validates with YOLO person detections to kill false positives:
+        if no person was detected by YOLO in this frame, skip entirely.
+        """
         import cv2 as _cv2
         if not self._rate_limit_ok("face_detection", config):
             return
 
-        # Lazy init of Haar cascade (built into OpenCV, no download needed)
+        # Guard: if person_detections provided and empty, YOLO saw nobody — skip
+        if person_detections is not None and len(person_detections) == 0:
+            return
+
+        # Lazy init of Haar cascade
         if self._face_cascade is None:
             cascade_path = _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
             self._face_cascade = _cv2.CascadeClassifier(cascade_path)
 
+        h_frame, w_frame = frame.shape[:2]
         gray  = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
-        # Equalize for better detection in dim conditions
-        gray  = _cv2.equalizeHist(gray)
+        # NOTE: removed equalizeHist — it amplifies background noise causing false positives
         faces = self._face_cascade.detectMultiScale(
             gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(40, 40),
+            scaleFactor=1.08,    # slower but more accurate than 1.1
+            minNeighbors=9,      # was 5 — more passes = fewer false positives
+            minSize=(60, 60),    # was 40 — ignore tiny face-like regions
+            maxSize=(w_frame // 2, h_frame // 2),  # ignore impossibly large blobs
         )
 
         if len(faces) == 0:
-            return  # no face found — no event
+            return
 
-        min_conf = config.get("confidence", 0.65)
-        # Haar cascade doesn't give confidence — synthesize based on face size
-        h_frame, w_frame = frame.shape[:2]
-        largest = max(faces, key=lambda f: f[2] * f[3])   # biggest face
+        min_conf = config.get("confidence", 0.70)
+
+        # Filter: face bbox must overlap with at least one person bbox
+        if person_detections:
+            def overlaps(fx, fy, fw, fh, px1, py1, px2, py2) -> bool:
+                # Check if face rect overlaps person head region (top 40% of person bbox)
+                ph = py2 - py1
+                head_y2 = py1 + int(ph * 0.45)
+                return not (fx + fw < px1 or fx > px2 or fy + fh < py1 or fy > head_y2)
+
+            confirmed = []
+            for (fx, fy, fw, fh) in faces:
+                for p in person_detections:
+                    px1, py1, px2, py2 = p["bbox"]
+                    if overlaps(fx, fy, fw, fh, px1, py1, px2, py2):
+                        confirmed.append((fx, fy, fw, fh))
+                        break
+            faces = confirmed
+
+        if len(faces) == 0:
+            return
+
+        # Confidence proportional to largest face size
+        largest = max(faces, key=lambda f: f[2] * f[3])
         fx, fy, fw, fh = largest
         face_area_ratio = (fw * fh) / (w_frame * h_frame)
-        # confidence proportional to face size: 0.1 area = 0.90 conf
-        confidence = round(min(0.95, 0.60 + face_area_ratio * 3.0), 2)
+        confidence = round(min(0.95, 0.65 + face_area_ratio * 3.0), 2)
 
         if confidence < min_conf:
             return
 
-        # Draw all detected faces
+        # Draw confirmed faces
         for (x, y, w, h) in faces:
             _cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 220, 180), 2)
             _cv2.rectangle(frame, (x, y - 20), (x + w, y), (0, 220, 180), -1)

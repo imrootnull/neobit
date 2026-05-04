@@ -429,9 +429,9 @@ function EventDetailModal({ event: ev, onClose, onPrev, onNext }) {
               color: 'var(--text-muted)', fontSize: 13, gap: 8,
             }}>
               <Camera size={28} style={{ opacity: 0.15 }} />
-              <span>Sin captura ni clip disponible</span>
-              <span style={{ fontSize: 11, opacity: 0.6 }}>
-                Los eventos futuros incluirán snapshot y clip de video
+              <span>Sin evidencia disponible</span>
+              <span style={{ fontSize: 11, opacity: 0.6, textAlign: 'center', maxWidth: 300 }}>
+                La cámara no tenía señal al momento del evento o aún no genera capturas
               </span>
             </div>
           )}
