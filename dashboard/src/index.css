@@ -412,16 +412,17 @@ html, body, #root {
 .alert-feed {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 400px;
+  gap: 6px;
+  max-height: calc(100vh - 260px); /* fills sidebar panel without clipping */
   overflow-y: auto;
+  padding-right: 2px;              /* room for scrollbar */
 }
 
 .alert-item {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 10px;
+  padding: 9px 12px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: var(--bg-card);
@@ -447,10 +448,28 @@ html, body, #root {
   flex-shrink: 0;
 }
 
-.alert-body { flex: 1; min-width: 0; }
-.alert-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-.alert-meta  { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.alert-time  { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+.alert-body { flex: 1; min-width: 0; overflow: hidden; }
+.alert-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.alert-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  /* Allow two lines then clip */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  line-height: 1.4;
+}
+.alert-time { font-size: 10px; color: var(--text-muted); flex-shrink: 0; white-space: nowrap; }
 
 /* ─── Buttons ────────────────────────────────────────────────────────────────── */
 .btn {
