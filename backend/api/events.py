@@ -31,7 +31,8 @@ async def get_event_snapshot(event_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{event_id}/clip")
 async def get_event_clip(event_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    """Serve the video clip with HTTP Range support for browser video playback."""
+    """Serve the video clip. Transcodes FMP4/mp4v → H.264 on-the-fly for browser compatibility."""
+    import shutil, subprocess
     ev = await db.get(Event, event_id)
     if not ev:
         raise HTTPException(404, "Evento no encontrado")
@@ -39,11 +40,69 @@ async def get_event_clip(event_id: int, request: Request, db: AsyncSession = Dep
     if not path or not os.path.exists(path):
         raise HTTPException(404, "Clip no disponible para este evento")
 
-    file_size = os.path.getsize(path)
+    has_ffmpeg = shutil.which("ffmpeg") is not None
+
+    # ── Detect if the file needs transcoding ──────────────────────────────────
+    # FMP4 / mp4v codec is NOT supported by browsers — must transcode to H.264
+    needs_transcode = False
+    if has_ffmpeg:
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name",
+                 "-of", "default=noprint_wrappers=1:nokey=1", path],
+                capture_output=True, text=True, timeout=5,
+            )
+            codec = probe.stdout.strip().lower()
+            needs_transcode = codec in ("mpeg4", "msmpeg4v3", "msmpeg4v2", "fmp4", "")
+            logger.debug(f"Clip codec: {codec!r} → transcode={needs_transcode}")
+        except Exception:
+            needs_transcode = False
+
+    # ── Transcode stream: FMP4 → H.264 via ffmpeg pipe ───────────────────────
+    if needs_transcode:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", path,
+            "-vcodec", "libx264",
+            "-preset", "veryfast",
+            "-crf", "26",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "frag_keyframe+empty_moov+faststart",
+            "-f", "mp4",
+            "pipe:1",
+        ]
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+
+        def iter_transcode():
+            try:
+                while True:
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                proc.stdout.close()
+                proc.wait()
+
+        return StreamingResponse(
+            iter_transcode(),
+            media_type="video/mp4",
+            headers={
+                "Accept-Ranges":              "none",
+                "Cache-Control":              "no-store",
+                "Content-Disposition":        "inline",
+                "X-Content-Type-Options":     "nosniff",
+            },
+        )
+
+    # ── Direct serve with HTTP Range (already H.264) ──────────────────────────
+    file_size    = os.path.getsize(path)
     range_header = request.headers.get("range")
 
     if range_header:
-        # Parse "bytes=start-end"
         try:
             start_str, end_str = range_header.replace("bytes=", "").split("-")
             start = int(start_str)
@@ -54,7 +113,7 @@ async def get_event_clip(event_id: int, request: Request, db: AsyncSession = Dep
         end   = min(end, file_size - 1)
         chunk = end - start + 1
 
-        def iter_file():
+        def iter_range():
             with open(path, "rb") as f:
                 f.seek(start)
                 remaining = chunk
@@ -66,7 +125,7 @@ async def get_event_clip(event_id: int, request: Request, db: AsyncSession = Dep
                     yield data
 
         return StreamingResponse(
-            iter_file(),
+            iter_range(),
             status_code=206,
             media_type="video/mp4",
             headers={
@@ -77,7 +136,6 @@ async def get_event_clip(event_id: int, request: Request, db: AsyncSession = Dep
             },
         )
 
-    # No Range header — stream entire file
     def iter_full():
         with open(path, "rb") as f:
             while True:
@@ -95,6 +153,8 @@ async def get_event_clip(event_id: int, request: Request, db: AsyncSession = Dep
             "Cache-Control":  "max-age=3600",
         },
     )
+
+
 
 
 

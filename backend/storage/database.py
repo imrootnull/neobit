@@ -73,9 +73,10 @@ class Camera(Base):
     status = Column(SAEnum(CameraStatus), default=CameraStatus.inactive)
     enabled = Column(Boolean, default=True)
     frame_skip = Column(Integer, default=3)
-    resolution_w = Column(Integer, default=1280)
-    resolution_h = Column(Integer, default=720)
-    fps = Column(Float, default=25.0)
+    resolution_w = Column(Integer, default=0)    # 0 = no downscale
+    resolution_h = Column(Integer, default=0)
+    fps = Column(Float, default=0.0)             # 0 = no FPS cap
+    audio_enabled = Column(Boolean, default=False)
     zones = Column(JSON, default=list)           # List of polygon zones
     analytics_config = Column(JSON, default=dict) # Per-camera analytic toggles
     created_at = Column(DateTime, default=datetime.utcnow)
