@@ -19,6 +19,9 @@ class CameraCreate(BaseModel):
     rtsp_url: str
     location: Optional[str] = None
     frame_skip: int = 3
+    resolution_w: int = 0       # 0 = no downscale
+    resolution_h: int = 0
+    fps: float = 0.0             # 0 = no FPS cap
     analytics_config: dict = {}
     zones: list = []
 
@@ -28,6 +31,9 @@ class CameraUpdate(BaseModel):
     rtsp_url: Optional[str] = None
     location: Optional[str] = None
     frame_skip: Optional[int] = None
+    resolution_w: Optional[int] = None
+    resolution_h: Optional[int] = None
+    fps: Optional[float] = None
     enabled: Optional[bool] = None
     analytics_config: Optional[dict] = None
     zones: Optional[list] = None
@@ -47,6 +53,9 @@ class CameraResponse(BaseModel):
     status: str
     enabled: bool
     frame_skip: int
+    resolution_w: int
+    resolution_h: int
+    fps: float
     analytics_config: dict
     zones: list
 

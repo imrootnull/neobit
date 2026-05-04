@@ -32,7 +32,8 @@ class CameraStream:
     annotated_frame: Optional[np.ndarray] = field(default=None, repr=False)
     running:      bool  = False
     connected:    bool  = False
-    fps:          float = 0.0
+    fps:          float = 0.0        # effective processed FPS (after throttle+skip)
+    native_fps:   float = 0.0        # raw camera stream FPS
     frame_count:  int   = 0
     error_count:  int   = 0
     last_frame_time: float = 0.0
@@ -190,10 +191,11 @@ class StreamManager:
                 stream.error_count = 0
                 logger.success(f"✅ Camera {stream.camera_id} connected")
 
-                skip_counter  = 0
+                skip_counter   = 0
                 fps_start      = time.time()
-                fps_frames     = 0
-                throttle_start = time.time()  # for target_fps throttle
+                native_frames  = 0   # raw frames from camera
+                proc_frames    = 0   # frames actually processed (after throttle+skip)
+                throttle_start = time.time()
 
                 while stream.running:
                     ret, frame = stream.cap.read()
@@ -202,22 +204,23 @@ class StreamManager:
 
                     stream.last_frame_time = time.time()
                     stream.frame_count    += 1
-                    fps_frames            += 1
+                    native_frames         += 1
 
-                    # FPS measurement (every 1s)
+                    # Measure FPS every second (both native and effective)
                     elapsed = time.time() - fps_start
                     if elapsed >= 1.0:
-                        stream.fps   = fps_frames / elapsed
-                        fps_frames   = 0
-                        fps_start    = time.time()
+                        stream.native_fps = native_frames / elapsed
+                        stream.fps        = proc_frames  / elapsed
+                        native_frames     = 0
+                        proc_frames       = 0
+                        fps_start         = time.time()
 
                     # ── Target FPS throttle ──────────────────────────────────
-                    # Drop frames to cap the processing rate
                     if stream.target_fps > 0:
                         min_interval = 1.0 / stream.target_fps
                         since_last   = time.time() - throttle_start
                         if since_last < min_interval:
-                            continue   # discard frame, too soon
+                            continue
                         throttle_start = time.time()
 
                     # ── frame_skip (AI processing cadence) ──────────────────
@@ -230,13 +233,14 @@ class StreamManager:
                     if stream.max_width > 0:
                         h, w = frame.shape[:2]
                         if w > stream.max_width:
-                            scale  = stream.max_width / w
-                            new_w  = stream.max_width
-                            new_h  = int(h * scale)
-                            frame  = cv2.resize(frame, (new_w, new_h),
-                                                interpolation=cv2.INTER_AREA)
+                            scale = stream.max_width / w
+                            frame = cv2.resize(frame, (stream.max_width, int(h * scale)),
+                                               interpolation=cv2.INTER_AREA)
 
+                    proc_frames += 1
                     stream.buffer.append(frame)
+
+
 
             except Exception as e:
                 stream.connected = False
