@@ -218,16 +218,18 @@ class AnalyticsWorker:
         if yolo_analytics or need_persons:
             run_analytics = yolo_analytics.copy()
             if need_persons and "person_detection" not in run_analytics:
-                run_analytics["person_detection"] = enabled.get("person_detection", {})
+                # Force low-confidence person detection for cross-validation
+                run_analytics["person_detection"] = {"confidence": 0.35}
             if self._detector is None:
-                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.55)
+                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.35)
             working_frame, detections = self._detector.detect(working_frame, run_analytics, draw=True)
             raw_persons = [d for d in detections if d["class"] == "person"]
-            # Plausibility filter: real persons have h > w and occupy >2% frame area
             person_detections = [
                 d for d in raw_persons
                 if self._is_plausible_person(d, h_frame, w_frame)
             ]
+            logger.debug(f"cam{self.camera_id} | YOLO raw_persons={len(raw_persons)} "
+                         f"plausible={len(person_detections)}")
             self._evaluate_detections(detections, yolo_analytics)
 
         # ── EPP detection (model-based + body-zone spatial analysis) ──────────
