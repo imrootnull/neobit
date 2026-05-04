@@ -28,7 +28,9 @@ class CameraStream:
     cap:          Optional[cv2.VideoCapture] = field(default=None, repr=False)
     thread:       Optional[threading.Thread] = field(default=None, repr=False)
     buffer:       deque = field(default_factory=lambda: deque(maxlen=30), repr=False)
-    clip_buffer:  deque = field(default_factory=lambda: deque(maxlen=300), repr=False)
+    # Pre-event ring buffer: (timestamp, annotated_frame) tuples
+    # maxlen sized for 10s at ~15fps = 150 frames — enough for any pre-buffer window
+    clip_buffer:  deque = field(default_factory=lambda: deque(maxlen=150), repr=False)
     annotated_frame: Optional[np.ndarray] = field(default=None, repr=False)
     running:      bool  = False
     connected:    bool  = False
@@ -133,13 +135,20 @@ class StreamManager:
         return False
 
     def save_clip(self, camera_id: int, path: str, fps: float = 10.0,
-                  quality: str = 'medium') -> bool:
-        """Save last ~10 seconds from the clip_buffer as a compressed H.264 video."""
+                  quality: str = 'medium', frames: list | None = None) -> bool:
+        """
+        Save frames to an mp4 clip.
+        If `frames` is provided use those; otherwise fall back to clip_buffer.
+        """
         stream = self.streams.get(camera_id)
-        if not stream or len(stream.clip_buffer) < 3:
+        if frames is None:
+            if not stream or len(stream.clip_buffer) < 3:
+                return False
+            # clip_buffer stores (timestamp, frame) tuples
+            frames = [f for _, f in stream.clip_buffer]
+        if not frames:
             return False
-        frames = list(stream.clip_buffer)
-        h, w   = frames[0].shape[:2]
+        h, w = frames[0].shape[:2]
         os.makedirs(os.path.dirname(path), exist_ok=True)
         writer = open_writer(path, fps, w, h, quality=quality)
         for f in frames:

@@ -255,7 +255,7 @@ class AnalyticsWorker:
         stream_manager.set_annotated_frame(self.camera_id, working_frame)
         stream = stream_manager.streams.get(self.camera_id)
         if stream is not None:
-            stream.clip_buffer.append(working_frame)
+            stream.clip_buffer.append((time.time(), working_frame))
         logger.debug(f"cam{self.camera_id} | persons={len(person_detections)} | "
                      f"analytics={list(enabled.keys())}")
 
@@ -603,16 +603,13 @@ class AnalyticsWorker:
 
     def _emit_event(self, analytic_key: str, confidence: float,
                     description: Optional[str], config: dict):
-        """Publish event to EventBus and save snapshot + clip."""
-        import os, time as _time
+        """Publish event to EventBus and save snapshot + clip (5s pre + 5s post)."""
+        import os as _os, time as _time, threading as _threading
         self._record_event(analytic_key)
         severity    = config.get('severity_override',
                                   SEVERITY_RULES.get(analytic_key, 'medium'))
         description = description or _get_description(analytic_key, config)
 
-        # Save snapshot and clip — use the configured storage_path so
-        # all media goes to the selected disk (USB, NAS, etc.)
-        import os as _os, time as _time
         from backend.core.recording_manager import recording_manager as _rm
         ts           = _time.time()
         ts_str       = _time.strftime('%Y%m%d_%H%M%S', _time.localtime(ts))
@@ -620,15 +617,58 @@ class AnalyticsWorker:
         base_dir     = _os.path.join(storage_root, 'events',
                                      f'cam{self.camera_id}', analytic_key)
         _os.makedirs(base_dir, exist_ok=True)
-        snap_path    = _os.path.join(base_dir, f'{ts_str}_snap.jpg')
-        clip_path    = _os.path.join(base_dir, f'{ts_str}_clip.mp4')
+        snap_path = _os.path.join(base_dir, f'{ts_str}_snap.jpg')
+        clip_path = _os.path.join(base_dir, f'{ts_str}_clip.mp4')
 
+        # ── Snapshot ──────────────────────────────────────────────────────────
         snap_saved = stream_manager.save_snapshot(self.camera_id, snap_path)
         if snap_saved:
-            # Ring-buffer: keep only the last 200 snapshots per camera/analytic
             purge_oldest_snapshots(base_dir, keep_last=200)
-        clip_saved = stream_manager.save_clip(self.camera_id, clip_path)
 
+        # ── Pre-buffer: extract frames from last 5 seconds ───────────────────
+        PRE_SECS  = 5.0
+        POST_SECS = 5.0
+        CLIP_FPS  = 10.0
+
+        stream = stream_manager.streams.get(self.camera_id)
+        pre_frames = []
+        if stream:
+            cutoff = ts - PRE_SECS
+            pre_frames = [f for t, f in stream.clip_buffer if t >= cutoff]
+
+        # ── Post-buffer: collect frames for POST_SECS in background ──────────
+        camera_id_capture = self.camera_id
+
+        def _record_post_and_save():
+            post_frames = []
+            deadline = _time.time() + POST_SECS
+            interval = 1.0 / CLIP_FPS
+            while _time.time() < deadline:
+                t0 = _time.time()
+                s = stream_manager.streams.get(camera_id_capture)
+                if s and s.clip_buffer:
+                    _, latest = s.clip_buffer[-1]
+                    post_frames.append(latest.copy())
+                sleep = interval - (_time.time() - t0)
+                if sleep > 0:
+                    _time.sleep(sleep)
+
+            all_frames = pre_frames + post_frames
+            if all_frames:
+                stream_manager.save_clip(
+                    camera_id_capture, clip_path,
+                    fps=CLIP_FPS, frames=all_frames,
+                )
+                logger.debug(f"Clip saved: {len(pre_frames)} pre + "
+                             f"{len(post_frames)} post frames → {clip_path}")
+            else:
+                logger.warning(f"No frames for clip cam{camera_id_capture}")
+
+        clip_thread = _threading.Thread(target=_record_post_and_save, daemon=True,
+                                        name=f"clip-cam{self.camera_id}")
+        clip_thread.start()
+
+        # Publish event immediately — clip will be updated on disk once thread finishes
         event = AnalyticEvent(
             camera_id     = self.camera_id,
             analytic_type = analytic_key,
@@ -637,7 +677,7 @@ class AnalyticsWorker:
             confidence    = confidence,
             timestamp     = ts,
             snapshot_path = snap_path  if snap_saved else None,
-            recording_path= clip_path  if clip_saved else None,
+            recording_path= clip_path,   # path is known; file written by thread
             metadata      = {'config_snapshot': {
                 k: v for k, v in config.items()
                 if k not in ('sim_probability',)
@@ -649,7 +689,8 @@ class AnalyticsWorker:
             self.loop,
         )
         logger.debug(f'Event: cam{self.camera_id} | {analytic_key} | '
-                     f'{severity} | {confidence:.0%} | snap={snap_saved}')
+                     f'{severity} | {confidence:.0%} | snap={snap_saved} | '
+                     f'pre={len(pre_frames)}f post-recording=5s')
 
 
 # ─── Simulator helpers ────────────────────────────────────────────────────────
