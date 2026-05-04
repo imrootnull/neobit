@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Database (local state)
+*.db
+*.sqlite
+*.sqlite3
+
+# ML Models (large binary files — download separately)
+*.pt
+*.onnx
+*.tflite
+*.pth
+
+# Recordings, events, snapshots (runtime data)
+recordings/
+data/
+*.mp4
+*.avi
+*.mkv
+*.jpg
+*.jpeg
+*.png
+!dashboard/public/**/*.png
+!dashboard/public/**/*.jpg
+!dashboard/src/**/*.png
+!dashboard/src/**/*.svg
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Node.js
+dashboard/node_modules/
+dashboard/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary test files
+/tmp/
+_test_*
