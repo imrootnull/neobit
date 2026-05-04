@@ -211,14 +211,14 @@ class AnalyticsWorker:
         yolo_analytics = {k: v for k, v in enabled.items() if k in YOLO_ANALYTICS}
         if yolo_analytics:
             if self._detector is None:
-                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.45)
+                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.55)  # raised from 0.45
             working_frame, detections = self._detector.detect(working_frame, yolo_analytics, draw=True)
             self._evaluate_detections(detections, yolo_analytics)
 
         # ── Fall detection (pose estimation) ──────────────────────────────────
         if "fall_detection" in enabled:
             if self._fall_detector is None:
-                self._fall_detector = FallDetector("yolov8n-pose.pt", "cpu", 0.35)
+                self._fall_detector = FallDetector("yolov8n-pose.pt", "cpu", 0.50)  # raised from 0.35
             fall_cfg = enabled["fall_detection"]
             working_frame, falls = self._fall_detector.detect(working_frame, fall_cfg, draw=True)
             self._evaluate_falls(falls, fall_cfg)
@@ -387,17 +387,28 @@ def _default_sim_prob(key: str) -> float:
 def _default_interval(key: str) -> float:
     """Minimum seconds between events for the same analytic (rate limit)."""
     return {
-        "fire_detection":     5,
-        "fall_detection":     10,
-        "weapon_detection":   5,
-        "face_blacklist":     8,
-        "medical_emergency":  10,
-        "person_detection":   30,
-        "vehicle_detection":  20,
-        "lpr_recognition":    15,
-        "crowd_detection":    30,
-        "line_crossing":      10,
-    }.get(key, 20)
+        # High-priority — still need reasonable cooldown
+        "fire_detection":         15,
+        "smoke_detection":        15,
+        "weapon_detection":       10,
+        "fall_detection":         20,
+        "medical_emergency":      20,
+        "face_blacklist":         15,
+        # Medium-priority — longer cooldown prevents spam
+        "behavior_detection":     30,
+        "intrusion_detection":    20,
+        "line_crossing":          20,
+        # Low-priority — long cooldown, expected continuous presence
+        "person_detection":       60,
+        "face_detection":         60,
+        "face_recognition":       45,
+        "epp_detection":          45,
+        "vehicle_detection":      45,
+        "lpr_recognition":        30,
+        "crowd_detection":        60,
+        "loitering_detection":    30,
+        "theft_detection":        20,
+    }.get(key, 30)
 
 
 def _sim_confidence(key: str, config: dict) -> float:
