@@ -24,8 +24,9 @@ from loguru import logger
 from backend.core.event_bus import EventBus, AnalyticEvent
 from backend.core.stream_manager import stream_manager
 from backend.analytics.registry import ANALYTICS_BY_KEY
-from backend.inference.detector import YOLODetector, YOLO_ANALYTICS
+from backend.inference.detector     import YOLODetector, YOLO_ANALYTICS
 from backend.inference.fall_detector import FallDetector
+from backend.inference.ppe_detector  import PPEDetector
 from backend.core.recording_manager import purge_oldest_snapshots
 
 
@@ -130,6 +131,7 @@ class AnalyticsWorker:
     _last_event:      dict = field(default_factory=dict, repr=False)
     _detector:        Optional[YOLODetector] = field(default=None, repr=False)
     _fall_detector:   Optional[FallDetector] = field(default=None, repr=False)
+    _ppe_detector:    Optional[PPEDetector]  = field(default=None, repr=False)
     _face_cascade:    object = field(default=None, repr=False)   # cv2.CascadeClassifier
 
     def start(self):
@@ -222,9 +224,12 @@ class AnalyticsWorker:
             person_detections = [d for d in detections if d["class"] == "person"]
             self._evaluate_detections(detections, yolo_analytics)
 
-        # ── EPP detection (color analysis per person bbox) ───────────────────
-        if "epp_detection" in enabled and person_detections:
-            self._run_epp_detection(working_frame, person_detections, enabled["epp_detection"])
+        # ── EPP detection (model-based — color/brand agnostic) ────────────────
+        if "epp_detection" in enabled:
+            if self._ppe_detector is None:
+                self._ppe_detector = PPEDetector(device="cpu",
+                                                 conf_threshold=enabled["epp_detection"].get("confidence", 0.40))
+            self._run_epp_detection(working_frame, enabled["epp_detection"])
 
         # ── Fall detection (pose estimation) ──────────────────────────────────
         if "fall_detection" in enabled:
@@ -244,148 +249,48 @@ class AnalyticsWorker:
         if stream is not None:
             stream.clip_buffer.append(working_frame)
 
-    # ── EPP detection helpers ──────────────────────────────────────────
+    # ── EPP detection (model-based) ───────────────────────────────────
 
-    def _run_epp_detection(self, frame, persons: list[dict], config: dict):
+
+    def _run_epp_detection(self, frame, config: dict):
         """
-        Real EPP detection using HSV color analysis.
-        Analyzes head/torso/feet regions of each detected person.
-        Draws status overlay on the frame and fires event if violations found.
+        Model-based EPP detection using PPEDetector (keremberke/yolov8n-safety-equipment-detection).
+        Detects Hardhat, Safety Vest, Mask etc. regardless of color or brand.
+        Draws per-item bounding boxes on the live frame.
+        Fires event for each person with missing required EPP.
         """
-        import cv2 as _cv2, numpy as _np
+        if self._ppe_detector is None:
+            return
 
-        required = config.get("required_ppe", ["helmet", "vest"])
-        h_frame, w_frame = frame.shape[:2]
+        working_frame, detections = self._ppe_detector.detect(frame, config, draw=True)
+        # Update frame in-place (detect returns a copy)
+        frame[:] = working_frame
 
-        total_violations: list[str] = []
-        total_ok:         list[str] = []
+        if not self._rate_limit_ok("epp_detection", config):
+            return
 
-        for det in persons:
-            x1, y1, x2, y2 = det["bbox"]
-            ph = max(y2 - y1, 1)
+        required = config.get("required_ppe", ["helmet"])
+        key_map  = {
+            "helmet":  "casco",
+            "gloves":  "guantes",
+            "goggles": "gafas",
+            "mask":    "mascarilla",
+            "shoes":   "calzado",
+        }
 
-            # ── Region crops ────────────────────────────────────
-            head_y1  = max(y1, 0)
-            head_y2  = min(y1 + ph // 4, h_frame)          # top 25%
-            torso_y1 = head_y2
-            torso_y2 = min(y1 + 3 * ph // 4, h_frame)      # 25-75%
-            feet_y1  = torso_y2
-            feet_y2  = min(y2, h_frame)                      # 75-100%
+        # Collect violations: items that appear as NO-xxx
+        violations = set()
+        for det in detections:
+            if not det["present"] and det["ppe_key"] in required:
+                violations.add(key_map.get(det["ppe_key"], det["ppe_key"]))
 
-            bx1 = max(x1, 0)
-            bx2 = min(x2, w_frame)
-
-            head_crop  = frame[head_y1:head_y2,  bx1:bx2]
-            torso_crop = frame[torso_y1:torso_y2, bx1:bx2]
-            feet_crop  = frame[feet_y1:feet_y2,  bx1:bx2]
-
-            person_ok      : list[str] = []
-            person_missing : list[str] = []
-
-            # Helmet check (top 25%)
-            if "helmet" in required:
-                if head_crop.size > 0 and self._has_ppe_color(head_crop, "helmet"):
-                    person_ok.append("casco")
-                    self._draw_ppe_badge(frame, x1, head_y1, x2, head_y2, "Casco ✓", (0, 210, 80))
-                else:
-                    person_missing.append("casco")
-                    self._draw_ppe_badge(frame, x1, head_y1, x2, head_y2, "Sin casco", (0, 50, 220))
-
-            # Vest check (torso 25-75%)
-            if "vest" in required:
-                if torso_crop.size > 0 and self._has_ppe_color(torso_crop, "vest"):
-                    person_ok.append("chaleco")
-                    self._draw_ppe_badge(frame, x1, torso_y1, x2, torso_y2, "Chaleco ✓", (0, 210, 80))
-                else:
-                    person_missing.append("chaleco")
-                    self._draw_ppe_badge(frame, x1, torso_y1, x2, torso_y2, "Sin chaleco", (0, 50, 220))
-
-            # Boots check (bottom 25%)
-            if "boots" in required:
-                if feet_crop.size > 0 and self._has_ppe_color(feet_crop, "boots"):
-                    person_ok.append("botas")
-                else:
-                    person_missing.append("botas")
-
-            total_violations.extend(person_missing)
-            total_ok.extend(person_ok)
-
-            # Status bar below bounding box
-            status_color = (0, 200, 70) if not person_missing else (0, 60, 230)
-            status_text  = "EPP completo" if not person_missing else f"Falta: {', '.join(person_missing)}"
-            label_y = min(y2 + 16, h_frame - 4)
-            import cv2 as _cv2
-            _cv2.putText(frame, status_text, (x1 + 2, label_y),
-                         _cv2.FONT_HERSHEY_DUPLEX, 0.42, status_color, 1, _cv2.LINE_AA)
-
-        # Fire event if any violations detected
-        if total_violations and self._rate_limit_ok("epp_detection", config):
-            min_conf = config.get("confidence", 0.70)
-            confidence = round(min(0.96, 0.70 + len(total_violations) * 0.06), 2)
+        if violations:
+            min_conf   = config.get("confidence", 0.70)
+            confidence = round(min(0.96, 0.72 + len(violations) * 0.06), 2)
             if confidence >= min_conf:
-                desc = (
-                    f"{len(set(total_violations))} EPP faltante(s): {', '.join(sorted(set(total_violations)))}"
-                )
+                desc = f"EPP faltante: {', '.join(sorted(violations))}"
                 self._emit_event("epp_detection", confidence, desc, config)
 
-    @staticmethod
-    def _has_ppe_color(crop, ppe_type: str) -> bool:
-        """
-        Check if a crop region contains PPE-typical colors using HSV analysis.
-        Returns True if the dominant color matches the expected PPE item.
-        """
-        import cv2 as _cv2, numpy as _np
-        if crop is None or crop.size == 0:
-            return False
-
-        hsv = _cv2.cvtColor(crop, _cv2.COLOR_BGR2HSV)
-
-        if ppe_type == "helmet":
-            # Hard hats: yellow, orange, white, red, blue
-            masks = [
-                _cv2.inRange(hsv, _np.array([15,  120, 120]), _np.array([35,  255, 255])),  # yellow
-                _cv2.inRange(hsv, _np.array([ 5,  140, 120]), _np.array([15,  255, 255])),  # orange
-                _cv2.inRange(hsv, _np.array([ 0,    0, 200]), _np.array([180,  50, 255])),  # white
-                _cv2.inRange(hsv, _np.array([100, 100, 100]), _np.array([130, 255, 255])),  # blue
-                _cv2.inRange(hsv, _np.array([170, 120, 100]), _np.array([180, 255, 255])),  # red-hi
-                _cv2.inRange(hsv, _np.array([  0, 120, 100]), _np.array([  5, 255, 255])),  # red-lo
-            ]
-            threshold = 0.15  # 15% of crop must match
-
-        elif ppe_type == "vest":
-            # Hi-vis vests: fluorescent orange, yellow, lime-green
-            masks = [
-                _cv2.inRange(hsv, _np.array([15, 150, 150]), _np.array([35, 255, 255])),   # yellow-orange
-                _cv2.inRange(hsv, _np.array([ 5, 160, 140]), _np.array([15, 255, 255])),   # orange
-                _cv2.inRange(hsv, _np.array([35, 130, 130]), _np.array([75, 255, 255])),   # lime-green
-            ]
-            threshold = 0.20
-
-        elif ppe_type == "boots":
-            # Safety boots: black, dark brown, high-vis yellow at feet
-            masks = [
-                _cv2.inRange(hsv, _np.array([0, 0,   0]),   _np.array([180, 80,  70])),    # black/dark
-                _cv2.inRange(hsv, _np.array([5, 80,  40]),  _np.array([25,  200, 120])),   # dark brown
-            ]
-            threshold = 0.25
-        else:
-            return False
-
-        total_pixels = crop.shape[0] * crop.shape[1]
-        matched = sum(_np.count_nonzero(m) for m in masks)
-        return (matched / total_pixels) >= threshold
-
-    @staticmethod
-    def _draw_ppe_badge(frame, x1: int, y1: int, x2: int, y2: int,
-                        label: str, color: tuple):
-        """Draw a thin colored border + small label for a body region."""
-        import cv2 as _cv2
-        # Thin region border
-        _cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
-        # Small label inside region top-left
-        label_y = min(y1 + 11, y2 - 2)
-        _cv2.putText(frame, label, (x1 + 2, label_y),
-                     _cv2.FONT_HERSHEY_DUPLEX, 0.36, color, 1, _cv2.LINE_AA)
 
 
     def _run_face_detection(self, frame, config: dict):
