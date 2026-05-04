@@ -132,7 +132,7 @@ class AnalyticsWorker:
     _detector:        Optional[YOLODetector] = field(default=None, repr=False)
     _fall_detector:   Optional[FallDetector] = field(default=None, repr=False)
     _ppe_detector:    Optional[PPEDetector]  = field(default=None, repr=False)
-    _face_cascade:    object = field(default=None, repr=False)   # cv2.CascadeClassifier
+    _face_net:        object = field(default=None, repr=False)   # cv2.dnn face net
 
     def start(self):
         self.running = True
@@ -407,81 +407,101 @@ class AnalyticsWorker:
 
     def _run_face_detection(self, frame, config: dict, person_detections: list | None = None):
         """
-        Detect faces with OpenCV Haar cascade.
-        Cross-validates with YOLO person detections to kill false positives:
-        if no person was detected by YOLO in this frame, skip entirely.
+        Detect faces using OpenCV DNN (ResNet-SSD) face detector.
+        Far more accurate than Haar cascade: handles varying angles, lighting,
+        and strongly rejects non-face patterns (objects, body parts, clutter).
+
+        Model: res10_300x300_ssd_iter_140000.caffemodel (~10 MB, local)
+        Cross-validates with YOLO person bboxes to further eliminate FPs.
         """
         import cv2 as _cv2
+        import os
         if not self._rate_limit_ok("face_detection", config):
             return
 
-        # Guard: if person_detections provided and empty, YOLO saw nobody — skip
         if person_detections is not None and len(person_detections) == 0:
             return
 
-        # Lazy init of Haar cascade
-        if self._face_cascade is None:
-            cascade_path = _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            self._face_cascade = _cv2.CascadeClassifier(cascade_path)
+        # Lazy init of DNN face detector
+        if self._face_net is None:
+            models_dir = os.path.join(os.path.dirname(__file__), "..", "..", "models")
+            proto  = os.path.abspath(os.path.join(models_dir, "deploy.prototxt"))
+            model  = os.path.abspath(os.path.join(models_dir, "res10_300x300_ssd_iter_140000.caffemodel"))
+            if os.path.exists(proto) and os.path.exists(model):
+                self._face_net = _cv2.dnn.readNetFromCaffe(proto, model)
+                logger.info("DNN face detector loaded")
+            else:
+                logger.warning("DNN face model files not found — face detection disabled")
+                self._face_net = False   # sentinel: don't retry
+                return
 
-        h_frame, w_frame = frame.shape[:2]
-        gray  = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
-        # NOTE: removed equalizeHist — it amplifies background noise causing false positives
-        faces = self._face_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.08,    # slower but more accurate than 1.1
-            minNeighbors=9,      # was 5 — more passes = fewer false positives
-            minSize=(60, 60),    # was 40 — ignore tiny face-like regions
-            maxSize=(w_frame // 2, h_frame // 2),  # ignore impossibly large blobs
-        )
-
-        if len(faces) == 0:
+        if self._face_net is False:
             return
 
-        min_conf = config.get("confidence", 0.70)
+        h_frame, w_frame = frame.shape[:2]
+        min_conf_dnn = 0.65   # DNN internal confidence threshold
+        min_conf_evt = config.get("confidence", 0.70)
 
-        # Filter: face bbox must overlap with at least one person bbox
+        # Prepare input blob
+        blob = _cv2.dnn.blobFromImage(
+            _cv2.resize(frame, (300, 300)), 1.0,
+            (300, 300), (104.0, 177.0, 123.0),
+        )
+        self._face_net.setInput(blob)
+        detections = self._face_net.forward()
+
+        faces = []  # list of (x1, y1, x2, y2, conf)
+        for i in range(detections.shape[2]):
+            dnn_conf = float(detections[0, 0, i, 2])
+            if dnn_conf < min_conf_dnn:
+                continue
+            box = detections[0, 0, i, 3:7] * [w_frame, h_frame, w_frame, h_frame]
+            x1, y1, x2, y2 = box.astype(int)
+            # Clamp to frame
+            x1, y1 = max(x1, 0), max(y1, 0)
+            x2, y2 = min(x2, w_frame), min(y2, h_frame)
+            fw, fh = x2 - x1, y2 - y1
+            if fw < 40 or fh < 40:    # ignore tiny detections
+                continue
+            faces.append((x1, y1, x2, y2, dnn_conf))
+
+        if not faces:
+            return
+
+        # Cross-validate: face center must be in head region of a YOLO person bbox
         if person_detections:
-            def overlaps(fx, fy, fw, fh, px1, py1, px2, py2) -> bool:
-                # Check if face rect overlaps person head region (top 40% of person bbox)
-                ph = py2 - py1
-                head_y2 = py1 + int(ph * 0.45)
-                return not (fx + fw < px1 or fx > px2 or fy + fh < py1 or fy > head_y2)
-
             confirmed = []
-            for (fx, fy, fw, fh) in faces:
+            for (fx1, fy1, fx2, fy2, fc) in faces:
+                fcx = (fx1 + fx2) / 2
+                fcy = (fy1 + fy2) / 2
                 for p in person_detections:
                     px1, py1, px2, py2 = p["bbox"]
-                    if overlaps(fx, fy, fw, fh, px1, py1, px2, py2):
-                        confirmed.append((fx, fy, fw, fh))
+                    ph = py2 - py1
+                    head_y2 = py1 + int(ph * 0.40)   # top 40% = head region
+                    if px1 <= fcx <= px2 and py1 <= fcy <= head_y2:
+                        confirmed.append((fx1, fy1, fx2, fy2, fc))
                         break
             faces = confirmed
 
-        if len(faces) == 0:
+        if not faces:
             return
 
-        # Confidence proportional to largest face size
-        largest = max(faces, key=lambda f: f[2] * f[3])
-        fx, fy, fw, fh = largest
-        face_area_ratio = (fw * fh) / (w_frame * h_frame)
-        confidence = round(min(0.95, 0.65 + face_area_ratio * 3.0), 2)
-
-        if confidence < min_conf:
+        # Best confidence from DNN detections
+        best_conf = max(fc for *_, fc in faces)
+        if best_conf < min_conf_evt:
             return
 
         # Draw confirmed faces
-        for (x, y, w, h) in faces:
-            _cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 220, 180), 2)
-            _cv2.rectangle(frame, (x, y - 20), (x + w, y), (0, 220, 180), -1)
-            _cv2.putText(frame, f"Rostro {confidence:.0%}",
-                         (x + 3, y - 4),
+        for (x1, y1, x2, y2, fc) in faces:
+            _cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 220, 180), 2)
+            label = f"Rostro {fc:.0%}"
+            (tw, th), _ = _cv2.getTextSize(label, _cv2.FONT_HERSHEY_DUPLEX, 0.42, 1)
+            _cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 6, y1), (0, 220, 180), -1)
+            _cv2.putText(frame, label, (x1 + 3, y1 - 4),
                          _cv2.FONT_HERSHEY_DUPLEX, 0.42, (10, 10, 10), 1, _cv2.LINE_AA)
 
-        desc = (
-            f"{len(faces)} rostro(s) detectado(s)" if len(faces) > 1
-            else "Rostro detectado"
-        )
-        self._emit_event("face_detection", confidence, desc, config)
+        desc = f"{len(faces)} rostro(s) detectado(s)" if len(faces) > 1 else "Rostro detectado"
+        self._emit_event("face_detection", round(best_conf, 2), desc, config)
 
 
     def _evaluate_detections(self, detections: list, enabled: dict[str, dict]):
