@@ -94,55 +94,16 @@ def _draw_detection(frame, x1, y1, x2, y2, label: str, confidence: float,
 
 
 def _draw_overlay_stats(frame, detections: list, enabled_analytics: list):
-    """Bottom stats bar + top-right corner panel showing live counts."""
+    """Minimal overlay: only the IA-active badge (top-right). No counters."""
+    if not enabled_analytics:
+        return
     h, w = frame.shape[:2]
+    badge = f"IA: {len(enabled_analytics)} activas"
+    (bw, _), _ = cv2.getTextSize(badge, FONT, 0.36, 1)
+    cv2.putText(frame, badge, (w - bw - 8, 16),
+                FONT, 0.36, (100, 255, 180), 1, cv2.LINE_AA)
 
-    # ── Bottom bar ──────────────────────────────────────────────────────
-    bar_h = 24
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (0, h - bar_h), (w, h), (12, 12, 18), -1)
-    cv2.addWeighted(overlay, 0.70, frame, 0.30, 0, frame)
 
-    counts: dict[str, int] = {}
-    for d in detections:
-        counts[d["class"]] = counts.get(d["class"], 0) + 1
-
-    stats_parts = []
-    for cls, cnt in counts.items():
-        label = {
-            "person": "Personas", "car": "Autos", "truck": "Camiones",
-            "bus": "Autobuses", "motorcycle": "Motos", "bicycle": "Bicicletas",
-        }.get(cls, cls.capitalize())
-        stats_parts.append(f"{label}: {cnt}")
-    stats_text = "  |  ".join(stats_parts) if stats_parts else "Sin detecciones"
-
-    cv2.putText(frame, stats_text, (8, h - 7),
-                FONT, 0.40, (160, 220, 255), 1, cv2.LINE_AA)
-
-    # ── Top-right counter panel (like Dahua) ──────────────────────────
-    persons  = counts.get("person", 0)
-    vehicles = sum(counts.get(c, 0) for c in ("car","truck","bus","motorcycle","bicycle"))
-
-    panel_w, panel_h = 130, 48
-    px1 = w - panel_w - 6
-    py1 = 4
-    bg2 = frame.copy()
-    cv2.rectangle(bg2, (px1, py1), (px1 + panel_w, py1 + panel_h), (12, 12, 18), -1)
-    cv2.addWeighted(bg2, 0.72, frame, 0.28, 0, frame)
-    cv2.rectangle(frame, (px1, py1), (px1 + panel_w, py1 + panel_h),
-                  (60, 80, 100), 1)
-
-    cv2.putText(frame, f"Personas: {persons}",
-                (px1 + 6, py1 + 17), FONT, 0.40, (0, 200, 255), 1, cv2.LINE_AA)
-    cv2.putText(frame, f"Vehiculos: {vehicles}",
-                (px1 + 6, py1 + 36), FONT, 0.40, (255, 150, 80), 1, cv2.LINE_AA)
-
-    # IA badge (top-right corner below panel)
-    if enabled_analytics:
-        badge = f"IA: {len(enabled_analytics)} activas"
-        (bw, _), _ = cv2.getTextSize(badge, FONT, 0.36, 1)
-        cv2.putText(frame, badge, (w - bw - 8, py1 + panel_h + 16),
-                    FONT, 0.36, (100, 255, 180), 1, cv2.LINE_AA)
 
 
 # ─── Model loader (lazy, singleton per model path) ───────────────────────────

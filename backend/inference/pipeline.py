@@ -254,15 +254,18 @@ class AnalyticsWorker:
         stream = stream_manager.streams.get(self.camera_id)
         if stream is not None:
             stream.clip_buffer.append(working_frame)
+        logger.debug(f"cam{self.camera_id} | persons={len(person_detections)} | "
+                     f"analytics={list(enabled.keys())}")
 
     @staticmethod
     def _is_plausible_person(det: dict, frame_h: int, frame_w: int) -> bool:
-        """Reject YOLO 'person' detections that are too small or wrong aspect ratio."""
+        """Reject clear YOLO false positives (tiny objects, horizontal blobs)."""
         x1, y1, x2, y2 = det["bbox"]
         w, h = max(x2 - x1, 1), max(y2 - y1, 1)
-        aspect  = h / w                              # standing person: h > w
-        area_r  = (w * h) / (frame_h * frame_w)     # fraction of frame
-        return aspect > 0.7 and area_r > 0.015      # at least 1.5% frame, taller than wide
+        aspect = h / w                           # person: h > w
+        area_r = (w * h) / (frame_h * frame_w)  # fraction of frame
+        # Relaxed for fisheye/wide-angle cameras: 0.5% area, aspect > 0.5
+        return aspect > 0.50 and area_r > 0.005
 
 
     # ── EPP detection (model-based) ───────────────────────────────────
