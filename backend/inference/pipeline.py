@@ -210,28 +210,34 @@ class AnalyticsWorker:
         """Run YOLO + Fall + Face + EPP detection on a real frame."""
         working_frame = frame.copy()
         person_detections: list[dict] = []
+        h_frame, w_frame = frame.shape[:2]
 
         # ── General YOLO (persons, vehicles, etc.) ────────────────────────────
         yolo_analytics = {k: v for k, v in enabled.items() if k in YOLO_ANALYTICS}
-        if yolo_analytics or "epp_detection" in enabled:
-            # Always need YOLO if EPP is active (we need person bboxes)
+        need_persons   = "epp_detection" in enabled or "face_detection" in enabled
+        if yolo_analytics or need_persons:
             run_analytics = yolo_analytics.copy()
-            if "epp_detection" in enabled and "person_detection" not in run_analytics:
+            if need_persons and "person_detection" not in run_analytics:
                 run_analytics["person_detection"] = enabled.get("person_detection", {})
             if self._detector is None:
                 self._detector = YOLODetector("yolov8n.pt", "cpu", 0.55)
             working_frame, detections = self._detector.detect(working_frame, run_analytics, draw=True)
-            person_detections = [d for d in detections if d["class"] == "person"]
+            raw_persons = [d for d in detections if d["class"] == "person"]
+            # Plausibility filter: real persons have h > w and occupy >2% frame area
+            person_detections = [
+                d for d in raw_persons
+                if self._is_plausible_person(d, h_frame, w_frame)
+            ]
             self._evaluate_detections(detections, yolo_analytics)
 
-        # ── EPP detection (model-based — color/brand agnostic) ────────────────
+        # ── EPP detection (model-based + body-zone spatial analysis) ──────────
         if "epp_detection" in enabled:
             if self._ppe_detector is None:
                 self._ppe_detector = PPEDetector(device="cpu",
                                                  conf_threshold=enabled["epp_detection"].get("confidence", 0.40))
-            self._run_epp_detection(working_frame, enabled["epp_detection"])
+            self._run_epp_detection(working_frame, enabled["epp_detection"], person_detections)
 
-        # ── Fall detection (pose estimation) ──────────────────────────────────
+        # ── Fall detection ─────────────────────────────────────────────────
         if "fall_detection" in enabled:
             if self._fall_detector is None:
                 self._fall_detector = FallDetector("yolov8n-pose.pt", "cpu", 0.50)
@@ -239,59 +245,163 @@ class AnalyticsWorker:
             working_frame, falls = self._fall_detector.detect(working_frame, fall_cfg, draw=False)
             self._evaluate_falls(falls, fall_cfg)
 
-        # ── Face detection (Haar cascade) ────────────────────────────────
-        # Only run if YOLO already detected at least one person in this frame
-        # (cross-validation: no person bbox = no face event, kills false positives)
+        # ── Face detection (only if YOLO confirmed plausible person) ───────────
         if "face_detection" in enabled and person_detections:
             self._run_face_detection(working_frame, enabled["face_detection"], person_detections)
 
-        # Commit annotated frame + clip buffer
+        # Commit
         stream_manager.set_annotated_frame(self.camera_id, working_frame)
         stream = stream_manager.streams.get(self.camera_id)
         if stream is not None:
             stream.clip_buffer.append(working_frame)
 
+    @staticmethod
+    def _is_plausible_person(det: dict, frame_h: int, frame_w: int) -> bool:
+        """Reject YOLO 'person' detections that are too small or wrong aspect ratio."""
+        x1, y1, x2, y2 = det["bbox"]
+        w, h = max(x2 - x1, 1), max(y2 - y1, 1)
+        aspect  = h / w                              # standing person: h > w
+        area_r  = (w * h) / (frame_h * frame_w)     # fraction of frame
+        return aspect > 0.7 and area_r > 0.015      # at least 1.5% frame, taller than wide
+
+
     # ── EPP detection (model-based) ───────────────────────────────────
 
 
-    def _run_epp_detection(self, frame, config: dict):
+    def _run_epp_detection(self, frame, config: dict, person_detections: list | None = None):
         """
-        Model-based EPP detection using PPEDetector (keremberke/yolov8n-safety-equipment-detection).
-        Detects Hardhat, Safety Vest, Mask etc. regardless of color or brand.
-        Draws per-item bounding boxes on the live frame.
-        Fires event for each person with missing required EPP.
+        Model-based EPP detection with body-zone spatial analysis.
+        Per item determines:
+          - MISSING: model detected NO_xxx class
+          - MAL PORTADO: item detected but NOT in the correct body region (e.g., helmet in hand)
+          - CORRECTO: item detected in the expected body region
         """
         if self._ppe_detector is None:
             return
 
         working_frame, detections = self._ppe_detector.detect(frame, config, draw=True)
-        # Update frame in-place (detect returns a copy)
         frame[:] = working_frame
 
-        if not self._rate_limit_ok("epp_detection", config):
-            return
-
-        required = config.get("required_ppe", ["helmet"])
-        key_map  = {
+        # ── Body zone definitions (fraction of person bbox height) ─────────────
+        CORRECT_ZONE: dict[str, tuple[float, float]] = {
+            "helmet":  (0.00, 0.28),   # head: top 28%
+            "goggles": (0.02, 0.30),   # eyes/face: top 30%
+            "mask":    (0.05, 0.35),   # face: 5–35%
+            "gloves":  (0.25, 0.95),   # hands: anywhere below shoulders
+            "shoes":   (0.65, 1.00),   # feet: bottom 35%
+        }
+        ZONE_NAMES: dict[str, str] = {
+            "helmet":  "cabeza",
+            "goggles": "ojos",
+            "mask":    "rostro",
+            "gloves":  "manos",
+            "shoes":   "pies",
+        }
+        KEY_ES: dict[str, str] = {
             "helmet":  "casco",
             "gloves":  "guantes",
             "goggles": "gafas",
             "mask":    "mascarilla",
             "shoes":   "calzado",
         }
+        required = config.get("required_ppe", ["helmet"])
 
-        # Collect violations: items that appear as NO-xxx
-        violations = set()
+        violations_missing: set[str]              = set()   # no_xxx detected
+        violations_misuse:  set[tuple[str, str]]  = set()   # item present but wrong zone
+        correctly_worn:     set[str]              = set()   # item in correct zone
+
         for det in detections:
-            if not det["present"] and det["ppe_key"] in required:
-                violations.add(key_map.get(det["ppe_key"], det["ppe_key"]))
+            ppe_key = det["ppe_key"]
+            if ppe_key not in required:
+                continue
 
-        if violations:
+            if not det["present"]:
+                violations_missing.add(ppe_key)
+                continue
+
+            # PPE detected — check spatial position relative to nearest person
+            if not person_detections:
+                correctly_worn.add(ppe_key)   # can't determine; assume ok
+                continue
+
+            ex1, ey1, ex2, ey2 = det["bbox"]
+            epy_center = (ey1 + ey2) / 2
+            epx_center = (ex1 + ex2) / 2
+
+            # Find the person whose bbox horizontally overlaps or is nearest
+            best_person = None
+            best_score  = float('inf')
+            for p in person_detections:
+                px1, py1, px2, py2 = p["bbox"]
+                pcx = (px1 + px2) / 2
+                pcy = (py1 + py2) / 2
+                dist = abs(epx_center - pcx) + abs(epy_center - pcy)
+                # Bonus if EPP center is within person bbox horizontally
+                if px1 <= epx_center <= px2:
+                    dist *= 0.4
+                if dist < best_score:
+                    best_score  = dist
+                    best_person = p
+
+            if best_person is None:
+                correctly_worn.add(ppe_key)
+                continue
+
+            bx1, by1, bx2, by2 = best_person["bbox"]
+            ph    = max(by2 - by1, 1)
+            rel_y = (epy_center - by1) / ph   # 0 = top of person, 1 = bottom
+
+            zone = CORRECT_ZONE.get(ppe_key, (0.0, 1.0))
+            if zone[0] <= rel_y <= zone[1]:
+                correctly_worn.add(ppe_key)
+                # Draw green tick on the live frame to confirm correct wear
+                import cv2 as _cv2
+                ex1i, ey1i, ex2i, ey2i = [int(v) for v in det["bbox"]]
+                _cv2.putText(frame, f"{KEY_ES.get(ppe_key, ppe_key)} OK ✓",
+                             (ex1i, ey1i - 4), _cv2.FONT_HERSHEY_DUPLEX,
+                             0.38, (0, 200, 60), 1, _cv2.LINE_AA)
+            else:
+                zone_name = ZONE_NAMES.get(ppe_key, "posición correcta")
+                violations_misuse.add((ppe_key, zone_name))
+                # Draw amber warning for misuse
+                import cv2 as _cv2
+                ex1i, ey1i, ex2i, ey2i = [int(v) for v in det["bbox"]]
+                _cv2.rectangle(frame, (ex1i, ey1i), (ex2i, ey2i), (0, 140, 230), 2)
+                _cv2.putText(frame, f"Mal portado: {KEY_ES.get(ppe_key, ppe_key)}",
+                             (ex1i, ey1i - 4), _cv2.FONT_HERSHEY_DUPLEX,
+                             0.38, (0, 140, 230), 1, _cv2.LINE_AA)
+
+        # Status bar under each person bbox
+        import cv2 as _cv2
+        h_frame = frame.shape[0]
+        if person_detections:
+            misuse_keys = {k for k, _ in violations_misuse}
+            for p in person_detections:
+                bx1, by1, bx2, by2 = p["bbox"]
+                label_y = min(by2 + 16, h_frame - 4)
+                all_ok  = not violations_misuse and not violations_missing
+                color   = (0, 200, 60) if all_ok else (0, 60, 220)
+                parts   = []
+                for k in sorted(violations_missing):
+                    parts.append(f"sin {KEY_ES.get(k, k)}")
+                for k, zn in sorted(violations_misuse):
+                    parts.append(f"{KEY_ES.get(k, k)} no en {zn}")
+                label = "EPP correcto" if all_ok else "EPP: " + ", ".join(parts[:2])
+                _cv2.putText(frame, label, (bx1 + 2, label_y),
+                             _cv2.FONT_HERSHEY_DUPLEX, 0.40, color, 1, _cv2.LINE_AA)
+
+        # Fire events
+        if (violations_missing or violations_misuse) and self._rate_limit_ok("epp_detection", config):
             min_conf   = config.get("confidence", 0.70)
-            confidence = round(min(0.96, 0.72 + len(violations) * 0.06), 2)
+            n_viol     = len(violations_missing) + len(violations_misuse)
+            confidence = round(min(0.96, 0.72 + n_viol * 0.05), 2)
             if confidence >= min_conf:
-                desc = f"EPP faltante: {', '.join(sorted(violations))}"
-                self._emit_event("epp_detection", confidence, desc, config)
+                parts = []
+                for k in sorted(violations_missing):
+                    parts.append(f"{KEY_ES.get(k, k)} faltante")
+                for k, zn in sorted(violations_misuse):
+                    parts.append(f"{KEY_ES.get(k, k)} mal portado (no en {zn})")
+                self._emit_event("epp_detection", confidence, "; ".join(parts), config)
 
 
 
