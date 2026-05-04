@@ -612,6 +612,29 @@ return (
   );
 }
 
+// ─── Section wrapper (must be outside CameraModal to avoid remount on each render) ───
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{
+      padding: '14px 16px',
+      borderRadius: 10,
+      border: '1px solid var(--border)',
+      background: 'rgba(255,255,255,0.02)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+    }}>
+      <span style={{
+        fontSize: 11, fontWeight: 700, letterSpacing: '0.06em',
+        textTransform: 'uppercase', color: 'var(--text-muted)',
+      }}>
+        {title}
+      </span>
+      {children}
+    </div>
+  );
+}
+
 // ─── Camera Modal ─────────────────────────────────────────────────────────────
 
 interface CameraForm {
@@ -790,25 +813,7 @@ function CameraModal({ camera, initialData, onClose, onSave }: {
     value: p.value,
   }));
 
-  const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
-    <div style={{
-      padding: '14px 16px',
-      borderRadius: 10,
-      border: '1px solid var(--border)',
-      background: 'rgba(255,255,255,0.02)',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 10,
-    }}>
-      <span style={{
-        fontSize: 11, fontWeight: 700, letterSpacing: '0.06em',
-        textTransform: 'uppercase', color: 'var(--text-muted)',
-      }}>
-        {title}
-      </span>
-      {children}
-    </div>
-  );
+
 
   return (
     <div className="modal-backdrop" onClick={onClose}>

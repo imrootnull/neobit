@@ -1,17 +1,52 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { getMjpegUrl } from '../api';
-import { WifiOff, AlertTriangle } from 'lucide-react';
+import { WifiOff, AlertTriangle, X, Maximize2, Minimize2, Signal, Radio } from 'lucide-react';
 import { ANALYTIC_ICONS } from './Icons';
 
-const GRID_CLASSES = {
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface Camera {
+  id: number;
+  name: string;
+  location?: string;
+  rtsp_url?: string;
+}
+
+interface StreamInfo {
+  camera_id: number;
+  connected: boolean;
+  fps: number;
+  native_fps?: number;
+}
+
+interface AnalyticEvent {
+  camera_id: number;
+  analytic_type: string;
+  severity: string;
+  confidence: number;
+  description?: string;
+}
+
+interface CameraGridProps {
+  cameras: Camera[];
+  streams: StreamInfo[];
+  lastEvent: AnalyticEvent | null;
+  onSelect?: (cam: Camera) => void;
+}
+
+// ─── Grid layout map ─────────────────────────────────────────────────────────
+
+const GRID_CLASSES: Record<number, string> = {
   1: 'grid-1', 2: 'grid-2', 3: 'grid-2',
   4: 'grid-4', 5: 'grid-6', 6: 'grid-6',
   7: 'grid-8', 8: 'grid-8',
 };
 
-export default function CameraGrid({ cameras, streams, lastEvent, onSelect }) {
-  const [selected, setSelected]     = useState(null);
-  const [cameraAlerts, setCameraAlerts] = useState({});
+// ─── Main grid ────────────────────────────────────────────────────────────────
+
+export default function CameraGrid({ cameras, streams, lastEvent, onSelect }: CameraGridProps) {
+  const [expanded, setExpanded]         = useState<Camera | null>(null);
+  const [cameraAlerts, setCameraAlerts] = useState<Record<number, AnalyticEvent>>({});
 
   useEffect(() => {
     if (!lastEvent) return;
@@ -23,12 +58,19 @@ export default function CameraGrid({ cameras, streams, lastEvent, onSelect }) {
     return () => clearTimeout(t);
   }, [lastEvent]);
 
-  const gridClass = GRID_CLASSES[cameras.length] || 'grid-8';
+  // Close on Escape
+  useEffect(() => {
+    const handle = (e: KeyboardEvent) => { if (e.key === 'Escape') setExpanded(null); };
+    window.addEventListener('keydown', handle);
+    return () => window.removeEventListener('keydown', handle);
+  }, []);
 
-  const handleSelect = (cam) => {
-    setSelected(cam.id === selected ? null : cam.id);
+  const gridClass = GRID_CLASSES[cameras.length] ?? 'grid-8';
+
+  const handleSelect = useCallback((cam: Camera) => {
+    setExpanded(cam);
     onSelect?.(cam);
-  };
+  }, [onSelect]);
 
   if (!cameras.length) {
     return (
@@ -42,46 +84,240 @@ export default function CameraGrid({ cameras, streams, lastEvent, onSelect }) {
     );
   }
 
-  return (
-    <div className={`camera-grid ${gridClass}`}>
-      {cameras.map(cam => {
-        const info        = streams.find(s => s.camera_id === cam.id);
-        const isConnected = info?.connected ?? false;
-        const fps         = info?.fps ?? 0;
-        const alert       = cameraAlerts[cam.id];
+  const expandedStream = expanded
+    ? streams.find(s => s.camera_id === expanded.id)
+    : null;
 
-        return (
-          <CameraCell
-            key={cam.id}
-            camera={cam}
-            connected={isConnected}
-            fps={fps}
-            alert={alert}
-            selected={selected === cam.id}
-            onClick={() => handleSelect(cam)}
-          />
-        );
-      })}
-    </div>
+  return (
+    <>
+      {/* ── Thumbnail grid ── */}
+      <div className={`camera-grid ${gridClass}`}>
+        {cameras.map(cam => {
+          const info        = streams.find(s => s.camera_id === cam.id);
+          const isConnected = info?.connected ?? false;
+          const fps         = info?.fps ?? 0;
+          const alert       = cameraAlerts[cam.id];
+
+          return (
+            <CameraCell
+              key={cam.id}
+              camera={cam}
+              connected={isConnected}
+              fps={fps}
+              alert={alert}
+              selected={expanded?.id === cam.id}
+              onClick={() => handleSelect(cam)}
+            />
+          );
+        })}
+      </div>
+
+      {/* ── Expanded view modal ── */}
+      {expanded && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 2000,
+            background: 'rgba(0,0,0,0.88)',
+            backdropFilter: 'blur(6px)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+            animation: 'fadeIn 0.15s ease',
+          }}
+          onClick={() => setExpanded(null)}
+        >
+          <div
+            style={{
+              width: '100%',
+              maxWidth: 1100,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{
+                  width: 8, height: 8, borderRadius: '50%',
+                  background: expandedStream?.connected ? 'var(--accent-green)' : 'var(--accent-red)',
+                  boxShadow: expandedStream?.connected ? '0 0 8px var(--accent-green)' : 'none',
+                  flexShrink: 0,
+                }} />
+                <span style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>
+                  {expanded.name}
+                </span>
+                {expanded.location && (
+                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>
+                    · {expanded.location}
+                  </span>
+                )}
+                {expandedStream?.connected && (
+                  <span style={{
+                    fontSize: 11, fontWeight: 700, letterSpacing: '0.08em',
+                    background: 'rgba(239,68,68,0.85)', color: '#fff',
+                    padding: '2px 7px', borderRadius: 4,
+                  }}>
+                    LIVE
+                  </span>
+                )}
+                {expandedStream?.connected && (expandedStream.fps ?? 0) > 0 && (
+                  <span style={{
+                    fontSize: 11, color: 'rgba(255,255,255,0.5)',
+                    fontFamily: 'monospace',
+                  }}>
+                    {(expandedStream.fps).toFixed(0)} fps
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={() => setExpanded(null)}
+                style={{
+                  background: 'rgba(255,255,255,0.1)',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: 8,
+                  color: '#fff',
+                  padding: '6px 10px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 12,
+                  fontWeight: 500,
+                  transition: 'all 0.15s ease',
+                }}
+                title="Cerrar (Esc)"
+              >
+                <X size={14} /> Cerrar
+              </button>
+            </div>
+
+            {/* Video */}
+            <div style={{
+              position: 'relative',
+              width: '100%',
+              aspectRatio: '16/9',
+              background: '#000',
+              borderRadius: 12,
+              overflow: 'hidden',
+              border: '1px solid rgba(255,255,255,0.1)',
+              boxShadow: '0 32px 64px rgba(0,0,0,0.7)',
+            }}>
+              {expandedStream?.connected ? (
+                <img
+                  src={getMjpegUrl(expanded.id)}
+                  alt={expanded.name}
+                  style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+                />
+              ) : (
+                <div style={{
+                  display: 'flex', flexDirection: 'column',
+                  alignItems: 'center', justifyContent: 'center',
+                  height: '100%', gap: 12, color: 'rgba(255,255,255,0.3)',
+                }}>
+                  <WifiOff size={48} style={{ opacity: 0.3 }} />
+                  <span style={{ fontSize: 14 }}>Sin señal — reconectando...</span>
+                </div>
+              )}
+            </div>
+
+            {/* Camera grid thumbnails — click to switch */}
+            {cameras.length > 1 && (
+              <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 2 }}>
+                {cameras.map(cam => {
+                  const info  = streams.find(s => s.camera_id === cam.id);
+                  const isOk  = info?.connected ?? false;
+                  const isAct = cam.id === expanded.id;
+                  return (
+                    <button
+                      key={cam.id}
+                      onClick={() => setExpanded(cam)}
+                      style={{
+                        flexShrink: 0,
+                        width: 120,
+                        aspectRatio: '16/9',
+                        borderRadius: 6,
+                        overflow: 'hidden',
+                        border: `2px solid ${isAct ? 'var(--accent-cyan)' : 'rgba(255,255,255,0.12)'}`,
+                        background: '#000',
+                        cursor: 'pointer',
+                        position: 'relative',
+                        transition: 'border-color 0.15s ease',
+                        padding: 0,
+                      }}
+                    >
+                      {isOk ? (
+                        <img
+                          src={getMjpegUrl(cam.id)}
+                          alt={cam.name}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        />
+                      ) : (
+                        <div style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          height: '100%', background: '#111',
+                        }}>
+                          <WifiOff size={16} style={{ opacity: 0.3 }} />
+                        </div>
+                      )}
+                      <div style={{
+                        position: 'absolute', bottom: 0, left: 0, right: 0,
+                        background: 'linear-gradient(to top, rgba(0,0,0,0.8), transparent)',
+                        padding: '4px 6px',
+                        fontSize: 10, fontWeight: 600, color: '#fff',
+                        textAlign: 'left',
+                      }}>
+                        {cam.name}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
-function CameraCell({ camera, connected, fps, alert, selected, onClick }) {
+// ─── Camera Cell (thumbnail) ─────────────────────────────────────────────────
+
+interface CameraCellProps {
+  camera: Camera;
+  connected: boolean;
+  fps: number;
+  alert?: AnalyticEvent;
+  selected: boolean;
+  onClick: () => void;
+}
+
+function CameraCell({ camera, connected, fps, alert, selected, onClick }: CameraCellProps) {
   const [imgError, setImgError] = useState(false);
 
   useEffect(() => {
     if (connected) setImgError(false);
   }, [connected]);
 
-  const AlertIcon = alert ? (ANALYTIC_ICONS[alert.analytic_type] || AlertTriangle) : null;
+  const AlertIcon = alert ? (ANALYTIC_ICONS[alert.analytic_type] ?? AlertTriangle) : null;
 
   return (
     <div
       className={`camera-cell ${selected ? 'selected' : ''}`}
       onClick={onClick}
+      title={`${camera.name} — clic para expandir`}
       style={alert
-        ? { borderColor: 'var(--accent-amber)', boxShadow: '0 0 16px rgba(245,158,11,0.25)' }
-        : {}
+        ? { borderColor: 'var(--accent-amber)', boxShadow: '0 0 16px rgba(245,158,11,0.25)', cursor: 'pointer' }
+        : { cursor: 'pointer' }
       }
     >
       {connected && !imgError ? (
@@ -98,6 +334,20 @@ function CameraCell({ camera, connected, fps, alert, selected, onClick }) {
           </span>
         </div>
       )}
+
+      {/* Expand hint on hover */}
+      <div style={{
+        position: 'absolute',
+        top: 8, right: 8,
+        background: 'rgba(0,0,0,0.6)',
+        borderRadius: 6,
+        padding: '4px 6px',
+        opacity: 0,
+        transition: 'opacity 0.15s ease',
+        pointerEvents: 'none',
+      }} className="camera-expand-hint">
+        <Maximize2 size={12} color="#fff" />
+      </div>
 
       <div className="camera-cell-overlay" />
 
