@@ -231,7 +231,7 @@ class AnalyticsWorker:
             if self._fall_detector is None:
                 self._fall_detector = FallDetector("yolov8n-pose.pt", "cpu", 0.50)
             fall_cfg = enabled["fall_detection"]
-            working_frame, falls = self._fall_detector.detect(working_frame, fall_cfg, draw=True)
+            working_frame, falls = self._fall_detector.detect(working_frame, fall_cfg, draw=False)
             self._evaluate_falls(falls, fall_cfg)
 
         # ── Face detection (Haar cascade) ────────────────────────────────
