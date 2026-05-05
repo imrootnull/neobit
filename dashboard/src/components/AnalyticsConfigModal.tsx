@@ -10,7 +10,8 @@ import {
   X, ChevronDown, ChevronRight, Check, Zap,
   SlidersHorizontal, AlertTriangle, Info
 } from 'lucide-react';
-import { ANALYTIC_ICONS, CATEGORY_ICONS } from './Icons';
+import { ANALYTIC_ICONS, CATEGORY_ICONS, PPE_ICONS } from './Icons';
+
 
 const CATEGORY_LABELS = {
   detection:  'Detección',
@@ -359,15 +360,15 @@ function ParamsPanel({ analytic, catColor, saving, onSave }) {
         {/* EPP-specific */}
         {'required_ppe' in local && (() => {
           const EPP_ITEMS = [
-            { key: 'helmet',        label: 'Casco',             zone: 'cabeza',  icon: '🪖' },
-            { key: 'vest',          label: 'Chaleco',            zone: 'torso',   icon: '🦺' },
-            { key: 'gloves',        label: 'Guantes',            zone: 'manos',   icon: '🧤' },
-            { key: 'goggles',       label: 'Lentes',             zone: 'cara',    icon: '🥽' },
-            { key: 'mask',          label: 'Mascarilla',         zone: 'cara',    icon: '😷' },
-            { key: 'shoes',         label: 'Botas',              zone: 'pies',    icon: '👢' },
-            { key: 'overalls',      label: 'Overol',             zone: 'cuerpo',  icon: '👔' },
-            { key: 'harness',       label: 'Arnés',              zone: 'cuerpo',  icon: '🪢' },
-            { key: 'ear_protector', label: 'Protector auditivo', zone: 'orejas',  icon: '🎧' },
+            { key: 'helmet',        label: 'Casco',             zone: 'cabeza'  },
+            { key: 'vest',          label: 'Chaleco',            zone: 'torso'   },
+            { key: 'gloves',        label: 'Guantes',            zone: 'manos'   },
+            { key: 'goggles',       label: 'Lentes',             zone: 'cara'    },
+            { key: 'mask',          label: 'Mascarilla',         zone: 'cara'    },
+            { key: 'shoes',         label: 'Botas',              zone: 'pies'    },
+            { key: 'overalls',      label: 'Overol',             zone: 'cuerpo'  },
+            { key: 'harness',       label: 'Arnés',              zone: 'cuerpo'  },
+            { key: 'ear_protector', label: 'Protector auditivo', zone: 'orejas'  },
           ];
           return (
             <div className="form-group" style={{ flex: '1 1 100%', marginBottom: 0 }}>
@@ -379,7 +380,7 @@ function ParamsPanel({ analytic, catColor, saving, onSave }) {
                   const checked = (local.required_ppe || []).includes(key);
                   return (
                     <label key={key} style={{
-                      display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer',
                       padding: '5px 11px', borderRadius: 8, fontSize: 12,
                       background: checked ? catColor + '22' : 'rgba(255,255,255,0.04)',
                       border: `1px solid ${checked ? catColor + '66' : 'var(--border)'}`,
@@ -394,11 +395,11 @@ function ParamsPanel({ analytic, catColor, saving, onSave }) {
                           set('required_ppe', checked ? arr.filter(x => x !== key) : [...arr, key]);
                         }}
                       />
-                      <span style={{ fontSize: 15 }}>{icon}</span>
+                      {(() => { const IcoComp = PPE_ICONS[key]; return IcoComp ? <IcoComp size={15} /> : null; })()}
                       <span style={{ fontWeight: 600 }}>{label}</span>
                       <span style={{
-                        fontSize: 10, opacity: 0.7,
-                        background: 'rgba(0,0,0,0.2)', borderRadius: 4,
+                        fontSize: 10, opacity: 0.65,
+                        background: 'rgba(0,0,0,0.25)', borderRadius: 4,
                         padding: '1px 5px',
                       }}>{zone}</span>
                     </label>
