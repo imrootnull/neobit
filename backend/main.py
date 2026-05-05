@@ -178,7 +178,9 @@ async def health():
 
 # ─── Serve React Dashboard (local access) ────────────────────────────────────
 
-DASHBOARD_DIST = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
+# Project root is one level above backend/
+PROJECT_ROOT   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DASHBOARD_DIST = os.path.join(PROJECT_ROOT, "dashboard", "dist")
 
 if os.path.exists(DASHBOARD_DIST):
     app.mount("/assets", StaticFiles(directory=f"{DASHBOARD_DIST}/assets"), name="assets")
