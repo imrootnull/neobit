@@ -245,6 +245,8 @@ class YOLODetector:
                 conf     = float(box.conf[0])
 
                 if cls_name not in target_classes:
+                    # Log non-target detections at trace level to diagnose misses
+                    logger.trace(f"YOLO skipped: {cls_name} {conf:.0%} (targets={target_classes})")
                     continue
 
                 xyxy = box.xyxy[0].cpu().numpy().astype(int)

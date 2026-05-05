@@ -219,9 +219,10 @@ class AnalyticsWorker:
             run_analytics = yolo_analytics.copy()
             if need_persons and "person_detection" not in run_analytics:
                 # Force low-confidence person detection for cross-validation
-                run_analytics["person_detection"] = {"confidence": 0.35}
+                run_analytics["person_detection"] = {"confidence": 0.25}
+            # Use yolov8m (medium) — significantly better than nano for partial/fisheye views
             if self._detector is None:
-                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.35)
+                self._detector = YOLODetector("yolov8m.pt", "cpu", 0.25)
             working_frame, detections = self._detector.detect(working_frame, run_analytics, draw=True)
             raw_persons = [d for d in detections if d["class"] == "person"]
             person_detections = [
@@ -232,11 +233,15 @@ class AnalyticsWorker:
                          f"plausible={len(person_detections)}")
             self._evaluate_detections(detections, yolo_analytics)
 
-        # ── EPP detection (model-based + body-zone spatial analysis) ──────────
+        # ── EPP detection — runs on FULL frame, no person required ──────────────
+        # EPP model directly detects helmets, vests, etc. in the scene.
+        # If a person is present (YOLO confirmed), we add spatial body-zone analysis.
         if "epp_detection" in enabled:
             if self._ppe_detector is None:
-                self._ppe_detector = PPEDetector(device="cpu",
-                                                 conf_threshold=enabled["epp_detection"].get("confidence", 0.40))
+                self._ppe_detector = PPEDetector(
+                    device="cpu",
+                    conf_threshold=enabled["epp_detection"].get("confidence", 0.25),
+                )
             self._run_epp_detection(working_frame, enabled["epp_detection"], person_detections)
 
         # ── Fall detection ─────────────────────────────────────────────────
@@ -261,13 +266,13 @@ class AnalyticsWorker:
 
     @staticmethod
     def _is_plausible_person(det: dict, frame_h: int, frame_w: int) -> bool:
-        """Reject clear YOLO false positives (tiny objects, horizontal blobs)."""
+        """Reject clear YOLO false positives (tiny blobs, extreme horizontals)."""
         x1, y1, x2, y2 = det["bbox"]
         w, h = max(x2 - x1, 1), max(y2 - y1, 1)
         aspect = h / w                           # person: h > w
         area_r = (w * h) / (frame_h * frame_w)  # fraction of frame
-        # Relaxed for fisheye/wide-angle cameras: 0.5% area, aspect > 0.5
-        return aspect > 0.50 and area_r > 0.005
+        # Very relaxed for fisheye: 0.3% area, aspect > 0.35
+        return aspect > 0.35 and area_r > 0.003
 
 
     # ── EPP detection (model-based) ───────────────────────────────────

@@ -93,7 +93,7 @@ class PPEDetector:
     Falls back to a banner overlay when the model is not available.
     """
 
-    def __init__(self, device: str = "cpu", conf_threshold: float = 0.40):
+    def __init__(self, device: str = "cpu", conf_threshold: float = 0.25):
         self.device         = device
         self.conf_threshold = conf_threshold
         self._model         = None
