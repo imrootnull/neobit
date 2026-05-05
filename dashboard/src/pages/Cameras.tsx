@@ -2,10 +2,12 @@ import { useState, useEffect, useRef } from 'react';
 import { apiGet, apiPost, apiDelete, apiPatch } from '../api';
 import { useWS } from '../context/WSContext';
 import AnalyticsConfigModal from '../components/AnalyticsConfigModal';
+import FaceLibrary from '../components/FaceLibrary';
+
 import {
   Camera, Plus, Trash2, Wifi, WifiOff, Pencil, X, Check,
   ScanLine, Search, Loader, ChevronDown, ChevronRight,
-  Info, Radio, Fingerprint, SlidersHorizontal
+  Info, Radio, Fingerprint, SlidersHorizontal, Users
 } from 'lucide-react';
 import { ANALYTIC_ICONS } from '../components/Icons';
 
@@ -36,6 +38,7 @@ export default function Cameras() {
   const [configCamera, setConfigCamera] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);  // camera pending delete
   const [deleting, setDeleting]         = useState(false);
+  const [showFaceLib, setShowFaceLib]   = useState(false);
 
   const refresh = async () => {
     const [cams, sts] = await Promise.all([
@@ -89,14 +92,23 @@ export default function Cameras() {
             Hasta 8 cámaras RTSP — compatible con cualquier fabricante ONVIF
           </p>
         </div>
-        <button
-          id="add-camera-btn"
-          className="btn btn-primary"
-          onClick={() => openAdd()}
-          disabled={cameras.length >= 8}
-        >
-          <Plus size={15} /> Agregar cámara
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowFaceLib(true)}
+            style={{ fontSize: 13 }}
+          >
+            <Users size={14} /> Biblioteca de Rostros
+          </button>
+          <button
+            id="add-camera-btn"
+            className="btn btn-primary"
+            onClick={() => openAdd()}
+            disabled={cameras.length >= 8}
+          >
+            <Plus size={15} /> Agregar cámara
+          </button>
+        </div>
       </div>
 
       <div className="page-content">
@@ -152,6 +164,10 @@ export default function Cameras() {
           camera={configCamera}
           onClose={() => setConfigCamera(null)}
         />
+      )}
+
+      {showFaceLib && (
+        <FaceLibrary onClose={() => setShowFaceLib(false)} />
       )}
 
       {/* Delete confirmation modal */}

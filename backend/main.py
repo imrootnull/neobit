@@ -26,6 +26,7 @@ from backend.api.models import router as models_router
 from backend.api.onvif import router as onvif_router
 from backend.api.recording import router as recording_router
 from backend.api.playback import router as playback_router
+from backend.api.faces import router as faces_router
 from backend.inference.pipeline import inference_pipeline
 from backend.core.recording_manager import recording_manager
 
@@ -155,6 +156,7 @@ app.include_router(models_router)
 app.include_router(onvif_router)
 app.include_router(recording_router)
 app.include_router(playback_router)
+app.include_router(faces_router)
 
 
 # ─── System Info ─────────────────────────────────────────────────────────────

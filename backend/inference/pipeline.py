@@ -519,6 +519,19 @@ class AnalyticsWorker:
             _cv2.putText(frame, label, (x1 + 3, y1 - 4),
                          _cv2.FONT_HERSHEY_DUPLEX, 0.42, (10, 10, 10), 1, _cv2.LINE_AA)
 
+        # Save best-quality face to library (non-blocking, rate-limited per camera)
+        try:
+            from backend.core.face_library import FaceLibrary
+            best = max(faces, key=lambda f: f[4])   # highest confidence face
+            FaceLibrary.get().capture(
+                frame,
+                bbox=(best[0], best[1], best[2], best[3]),
+                camera_id=self._camera_id,
+                confidence=best[4],
+            )
+        except Exception as _e:
+            logger.trace(f"Face library capture error: {_e}")
+
         desc = f"{len(faces)} rostro(s) detectado(s)" if len(faces) > 1 else "Rostro detectado"
         self._emit_event("face_detection", round(best_conf, 2), desc, config)
 
