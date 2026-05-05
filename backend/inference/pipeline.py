@@ -493,7 +493,7 @@ class AnalyticsWorker:
         - RetinaFace detects faces at 320x320 input (~30ms CPU)
         - ArcFace R50 generates 512-d embeddings for identity matching
         - Cross-validates against YOLO person bboxes (top 45% = head zone)
-        - Saves captures to FaceLibrary at a rate-limited cadence
+        - Saves crop + full snapshot + video clip to FaceLibrary
         - Emits face_detection events; recognized faces include identity info
         """
         if person_detections is not None and len(person_detections) == 0:
@@ -514,25 +514,35 @@ class AnalyticsWorker:
         if not results:
             return
 
-        # Save best-quality face to library (rate-limited per camera via FaceLibrary)
+        # ── Save to FaceLibrary: crop + snapshot + clip ────────────────────────
         try:
-            from backend.core.face_library import FaceLibrary
+            from backend.core.face_library import FaceLibrary, CLIP_PRE_S
             best = max(results, key=lambda r: r["confidence"])
             x1, y1, x2, y2 = best["bbox"]
+
+            # Pull pre-buffer frames from ring buffer (last CLIP_PRE_S seconds)
+            pre_frames: list = []
+            stream = stream_manager.streams.get(self._camera_id)
+            if stream:
+                cutoff     = time.time() - CLIP_PRE_S
+                pre_frames = [f for t, f in stream.clip_buffer if t >= cutoff]
+
             FaceLibrary.get().capture(
                 frame,
-                bbox      = (x1, y1, x2, y2),
-                camera_id = self._camera_id,
-                confidence= best["confidence"],
+                bbox       = (x1, y1, x2, y2),
+                camera_id  = self._camera_id,
+                confidence = best["confidence"],
+                pre_frames = pre_frames,
+                identity   = best.get("identity"),
+                similarity = best.get("sim", 0.0),
             )
         except Exception as _e:
             logger.trace(f"Face library capture error: {_e}")
 
-        # Rate-limit events
+        # ── Rate-limited event emission ────────────────────────────────────────
         if not self._rate_limit_ok("face_detection", config):
             return
 
-        # Build event description
         identified = [r for r in results if r["identity"]]
         if identified:
             names     = ", ".join(r["identity"] for r in identified)
@@ -544,6 +554,7 @@ class AnalyticsWorker:
             best_conf = max(r["confidence"] for r in results)
 
         self._emit_event("face_detection", round(best_conf, 2), desc, config)
+
 
 
 
