@@ -290,21 +290,74 @@ class PPEDetector:
                     "bbox":       [int(x1), int(y1), int(x2), int(y2)],
                 })
 
-                if draw:
-                    color = COLOR_OK if present else COLOR_MISSING
-                    es    = EPP_LABELS_ES.get(ppe_key, ppe_key.title())
-                    label = f"{es} ✓" if present else f"Sin {es}"
-                    self._draw_box(annotated, x1, y1, x2, y2,
-                                   label, conf_val, color)
-
-        return annotated, detections
+        return frame, detections
 
     @staticmethod
-    def _draw_box(frame, x1, y1, x2, y2, label: str, conf: float, color: tuple):
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        text = f"{label} {conf:.0%}"
-        (tw, th), _ = cv2.getTextSize(text, FONT, FONT_SCALE, THICKNESS)
-        ly1 = max(y1 - th - 6, 0)
-        cv2.rectangle(frame, (x1, ly1), (x1 + tw + 6, y1), color, -1)
-        cv2.putText(frame, text, (x1 + 3, y1 - 3),
-                    FONT, FONT_SCALE, (10, 10, 10), THICKNESS, cv2.LINE_AA)
+    def draw_ppe_overlay(
+        frame: np.ndarray,
+        x1: int, y1: int, x2: int, y2: int,
+        label: str,
+        conf: float,
+        status: str,   # 'correct' | 'missing' | 'misuse'
+    ):
+        """
+        Draw a rich semi-transparent overlay on an EPP detection.
+          correct  → green fill + green border + checkmark label
+          misuse   → amber fill + amber border + warning label
+          missing  → red fill  + red border  + X label
+        """
+        import cv2 as _cv2
+
+        COLOR_MAP = {
+            "correct": (0,   210,  70),    # green
+            "misuse":  (0,   160, 230),    # amber
+            "missing": (40,   40, 220),    # red
+        }
+        STATUS_ICON = {
+            "correct": "✓",
+            "misuse":  "!",
+            "missing": "✗",
+        }
+
+        color = COLOR_MAP.get(status, (120, 120, 120))
+        icon  = STATUS_ICON.get(status, "?")
+
+        # Semi-transparent fill
+        overlay = frame.copy()
+        alpha   = 0.18 if status == "correct" else 0.28
+        _cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+        _cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+        # Border — thicker for violations
+        border_t = 2 if status == "correct" else 3
+        _cv2.rectangle(frame, (x1, y1), (x2, y2), color, border_t)
+
+        # Corner brackets for professional NVR look
+        L = max(min((x2 - x1), (y2 - y1)) // 5, 8)
+        pts = [
+            [(x1, y1 + L), (x1, y1), (x1 + L, y1)],
+            [(x2 - L, y1), (x2, y1), (x2, y1 + L)],
+            [(x1, y2 - L), (x1, y2), (x1 + L, y2)],
+            [(x2 - L, y2), (x2, y2), (x2, y2 - L)],
+        ]
+        for seg in pts:
+            for i in range(len(seg) - 1):
+                _cv2.line(frame, seg[i], seg[i + 1], color, 2, _cv2.LINE_AA)
+
+        # Label background + text
+        text = f"{icon} {label}  {conf:.0%}"
+        font       = _cv2.FONT_HERSHEY_DUPLEX
+        font_scale = 0.40
+        thickness  = 1
+        (tw, th), _ = _cv2.getTextSize(text, font, font_scale, thickness)
+        pad  = 4
+        lx1  = x1
+        ly1  = max(y1 - th - pad * 2, 0)
+        ly2  = y1
+        _cv2.rectangle(frame, (lx1, ly1), (lx1 + tw + pad * 2, ly2), color, -1)
+        _cv2.putText(
+            frame, text,
+            (lx1 + pad, ly2 - pad),
+            font, font_scale, (10, 10, 10), thickness, _cv2.LINE_AA,
+        )
+
