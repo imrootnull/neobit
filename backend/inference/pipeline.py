@@ -133,9 +133,18 @@ class AnalyticsWorker:
     _fall_detector:   Optional[FallDetector] = field(default=None, repr=False)
     _ppe_detector:    Optional[PPEDetector]  = field(default=None, repr=False)
     _face_net:        object = field(default=None, repr=False)   # cv2.dnn face net
+    # PPE async: run inference in background thread, cache overlay annotations
+    _ppe_frame_skip:  int    = field(default=5,    repr=False)   # run PPE every N frames
+    _ppe_frame_ctr:   int    = field(default=0,    repr=False)
+    _ppe_busy:        bool   = field(default=False, repr=False)  # background job running
+    _ppe_overlay:     object = field(default=None, repr=False)   # last annotated frame crop
+    _ppe_lock:        object = field(default=None, repr=False)   # threading.Lock
+    _camera_id:       int    = field(default=0,    repr=False)   # alias for camera_id
 
     def start(self):
-        self.running = True
+        self.running   = True
+        self._ppe_lock = threading.Lock()
+        self._camera_id = self.camera_id
         self.thread = threading.Thread(
             target=self._worker_loop,
             name=f"analytics-cam{self.camera_id}",
@@ -233,16 +242,46 @@ class AnalyticsWorker:
                          f"plausible={len(person_detections)}")
             self._evaluate_detections(detections, yolo_analytics)
 
-        # ── EPP detection — only when at least one plausible person is in frame ──
-        # Without a confirmed person there is no one to enforce EPP on, and the
-        # model produces false detections against background objects.
+        # ── EPP detection — async background, cached overlays ─────────────────
+        # PPE models are heavy (2x YOLO on CPU). We run them in a background
+        # thread every _ppe_frame_skip frames and overlay the last cached result
+        # on every intermediate frame to keep the stream latency low.
         if "epp_detection" in enabled and person_detections:
             if self._ppe_detector is None:
                 self._ppe_detector = PPEDetector(
                     device="cpu",
-                    conf_threshold=enabled["epp_detection"].get("confidence", 0.25),
+                    conf_threshold=enabled["epp_detection"].get("confidence", 0.30),
                 )
-            self._run_epp_detection(working_frame, enabled["epp_detection"], person_detections)
+            self._ppe_frame_ctr += 1
+            if self._ppe_frame_ctr >= self._ppe_frame_skip and not self._ppe_busy:
+                # Snapshot inputs for the background thread (thread-safe copies)
+                _frame_snap   = working_frame.copy()
+                _persons_snap = list(person_detections)
+                _config_snap  = dict(enabled["epp_detection"])
+
+                def _ppe_job():
+                    self._ppe_busy = True
+                    try:
+                        self._run_epp_detection(_frame_snap, _config_snap, _persons_snap)
+                        with self._ppe_lock:
+                            self._ppe_overlay = _frame_snap   # store annotated snapshot
+                    finally:
+                        self._ppe_busy = False
+
+                self._ppe_frame_ctr = 0
+                threading.Thread(target=_ppe_job, daemon=True, name="ppe-infer").start()
+
+            # Paint cached overlay onto current frame (copy only the annotated region)
+            with self._ppe_lock:
+                if self._ppe_overlay is not None:
+                    oh, ow = self._ppe_overlay.shape[:2]
+                    fh, fw = working_frame.shape[:2]
+                    if oh == fh and ow == fw:
+                        # Only copy pixels that differ from base (faster than full blend)
+                        mask = cv2.absdiff(self._ppe_overlay, frame)
+                        gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                        _, thresh = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
+                        working_frame[thresh > 0] = self._ppe_overlay[thresh > 0]
 
         # ── Fall detection ─────────────────────────────────────────────────
         if "fall_detection" in enabled:

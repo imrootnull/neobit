@@ -213,6 +213,8 @@ class PPEDetector:
         self._primary        = None
         self._secondary      = None
         self._model_ready    = False
+        self._secondary_ctr  = 0          # throttle secondary (slow) model
+        self._secondary_every = 10        # run secondary every N PPE calls
         threading.Thread(target=self._init_model, daemon=True,
                          name="ppe-model-load").start()
 
@@ -245,8 +247,20 @@ class PPEDetector:
         conf = config.get("confidence", self.conf_threshold)
         detections: list[dict] = []
 
-        # ── Run each loaded model ─────────────────────────────────────────────
-        models_to_run = [m for m in (self._primary, self._secondary) if m is not None]
+        # ── Primary always runs (fast ~50ms nano model) ───────────────────────
+        # ── Secondary throttled: runs every N calls (~150ms medium model) ─────
+        self._secondary_ctr += 1
+        run_secondary = (
+            self._secondary is not None
+            and self._secondary_ctr >= self._secondary_every
+        )
+        if run_secondary:
+            self._secondary_ctr = 0
+
+        models_to_run = [self._primary]
+        if run_secondary:
+            models_to_run.append(self._secondary)
+
         for model in models_to_run:
             try:
                 results = model(
