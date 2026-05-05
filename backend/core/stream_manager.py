@@ -184,42 +184,72 @@ class StreamManager:
         )
         stream.thread.start()
 
+    def _grab_loop(self, stream: CameraStream):
+        """
+        Fast grab-only loop — runs in its own thread.
+        Continuously drains the RTSP buffer by calling cap.grab() without
+        decoding. This prevents frame queue buildup which causes stream lag.
+        The main capture loop calls cap.retrieve() to get the latest frame.
+        """
+        while stream.running and stream.cap and stream.cap.isOpened():
+            stream.cap.grab()
+        logger.debug(f"Grab loop ended for camera {stream.camera_id}")
+
     def _capture_loop(self, stream: CameraStream):
-        """Main capture loop for a single camera — runs in its own thread."""
-        logger.info(f"🎬 Starting capture loop for camera {stream.camera_id}: {stream.rtsp_url}")
+        """Main capture loop — always reads the freshest frame via grab+retrieve."""
+        logger.info(f"Starting capture loop for camera {stream.camera_id}: {stream.rtsp_url}")
 
         while stream.running:
             try:
-                stream.cap = cv2.VideoCapture(stream.rtsp_url)
-                stream.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
-
-                if not stream.cap.isOpened():
+                cap = cv2.VideoCapture(stream.rtsp_url)
+                # BUFFERSIZE=1: keep only the latest frame in the OS buffer
+                # The grab loop drains everything above that continuously
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if not cap.isOpened():
                     raise ConnectionError(f"Cannot open: {stream.rtsp_url}")
 
+                stream.cap       = cap
                 stream.connected = True
                 stream.error_count = 0
-                logger.success(f"✅ Camera {stream.camera_id} connected")
+                logger.success(f"Camera {stream.camera_id} connected")
+
+                # Start the fast grab-drain thread
+                grab_thread = threading.Thread(
+                    target=self._grab_loop,
+                    args=(stream,),
+                    name=f"grab-cam{stream.camera_id}",
+                    daemon=True,
+                )
+                grab_thread.start()
 
                 skip_counter   = 0
                 fps_start      = time.time()
-                native_frames  = 0   # raw frames from camera
-                proc_frames    = 0   # frames actually processed (after throttle+skip)
+                native_frames  = 0
+                proc_frames    = 0
                 throttle_start = time.time()
 
                 while stream.running:
-                    ret, frame = stream.cap.read()
+                    # retrieve() decodes only the latest grabbed frame
+                    ret, frame = cap.retrieve()
                     if not ret:
-                        raise RuntimeError("Frame read failed")
+                        # grab loop may still be running; give it a moment
+                        time.sleep(0.005)
+                        # Double-check with a fresh grab
+                        if not cap.grab():
+                            raise RuntimeError("Frame grab failed — stream lost")
+                        ret, frame = cap.retrieve()
+                        if not ret:
+                            raise RuntimeError("Frame retrieve failed")
 
                     stream.last_frame_time = time.time()
                     stream.frame_count    += 1
                     native_frames         += 1
 
-                    # Measure FPS every second (both native and effective)
+                    # FPS accounting
                     elapsed = time.time() - fps_start
                     if elapsed >= 1.0:
                         stream.native_fps = native_frames / elapsed
-                        stream.fps        = proc_frames  / elapsed
+                        stream.fps        = proc_frames   / elapsed
                         native_frames     = 0
                         proc_frames       = 0
                         fps_start         = time.time()
@@ -229,10 +259,12 @@ class StreamManager:
                         min_interval = 1.0 / stream.target_fps
                         since_last   = time.time() - throttle_start
                         if since_last < min_interval:
+                            # Sleep remainder so grab loop stays active
+                            time.sleep(min_interval - since_last)
                             continue
                         throttle_start = time.time()
 
-                    # ── frame_skip (AI processing cadence) ──────────────────
+                    # ── Frame skip (analytics cadence) ───────────────────────
                     skip_counter += 1
                     if skip_counter < stream.frame_skip:
                         continue
@@ -243,26 +275,28 @@ class StreamManager:
                         h, w = frame.shape[:2]
                         if w > stream.max_width:
                             scale = stream.max_width / w
-                            frame = cv2.resize(frame, (stream.max_width, int(h * scale)),
-                                               interpolation=cv2.INTER_AREA)
+                            frame = cv2.resize(
+                                frame,
+                                (stream.max_width, int(h * scale)),
+                                interpolation=cv2.INTER_AREA,
+                            )
 
                     proc_frames += 1
                     stream.buffer.append(frame)
 
-
-
             except Exception as e:
-                stream.connected = False
+                stream.connected  = False
                 stream.error_count += 1
-                logger.error(f"❌ Camera {stream.camera_id} error: {e}")
+                logger.error(f"Camera {stream.camera_id} error: {e}")
                 if stream.cap:
                     stream.cap.release()
+                    stream.cap = None
 
                 if stream.running:
-                    logger.info(f"🔄 Camera {stream.camera_id} reconnecting in {self.RECONNECT_DELAY}s...")
+                    logger.info(f"Camera {stream.camera_id} reconnecting in {self.RECONNECT_DELAY}s...")
                     time.sleep(self.RECONNECT_DELAY)
 
-        logger.info(f"🛑 Capture loop ended for camera {stream.camera_id}")
+        logger.info(f"Capture loop ended for camera {stream.camera_id}")
 
     def stop_all(self):
         """Stop all running streams."""

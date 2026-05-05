@@ -41,17 +41,19 @@ def _load_app():
         if "app" in _app_cache:
             return _app_cache["app"]
         try:
-            import insightface
             from insightface.app import FaceAnalysis
+            from backend.utils.hardware import get_ort_providers
 
+            providers = get_ort_providers()
             app = FaceAnalysis(
                 name=MODEL_PACK,
-                providers=["CPUExecutionProvider"],   # CPU only — no CUDA
+                providers=providers,
             )
-            # det_size controls RetinaFace input — 320 is fast, 640 is more accurate
-            app.prepare(ctx_id=0, det_size=(320, 320), det_thresh=DET_THRESH)
+            # det_size=320 fast on CPU; bump to 640 when GPU available
+            det_size = (640, 640) if providers[0] != "CPUExecutionProvider" else (320, 320)
+            app.prepare(ctx_id=0, det_size=det_size, det_thresh=DET_THRESH)
             _app_cache["app"] = app
-            logger.success(f"InsightFace '{MODEL_PACK}' loaded OK")
+            logger.success(f"InsightFace '{MODEL_PACK}' loaded — providers={providers} det={det_size}")
             return app
         except Exception as e:
             logger.error(f"InsightFace load failed: {e}")

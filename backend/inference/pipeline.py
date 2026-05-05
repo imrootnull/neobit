@@ -237,7 +237,8 @@ class AnalyticsWorker:
             # Precision tradeoff is acceptable for person detection at typical
             # surveillance distances. EPP uses its own dedicated models.
             if self._detector is None:
-                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.25)
+                from backend.utils.hardware import get_device
+                self._detector = YOLODetector("yolov8n.pt", get_device(), 0.25)
             working_frame, detections = self._detector.detect(
                 working_frame, run_analytics, draw=True, imgsz=416
             )
@@ -256,8 +257,9 @@ class AnalyticsWorker:
         # on every intermediate frame to keep the stream latency low.
         if "epp_detection" in enabled and person_detections:
             if self._ppe_detector is None:
+                from backend.utils.hardware import get_device
                 self._ppe_detector = PPEDetector(
-                    device="cpu",
+                    device=get_device(),
                     conf_threshold=enabled["epp_detection"].get("confidence", 0.30),
                 )
             self._ppe_frame_ctr += 1
