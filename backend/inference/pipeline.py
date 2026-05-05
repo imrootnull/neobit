@@ -271,17 +271,17 @@ class AnalyticsWorker:
                 self._ppe_frame_ctr = 0
                 threading.Thread(target=_ppe_job, daemon=True, name="ppe-infer").start()
 
-            # Paint cached overlay onto current frame (copy only the annotated region)
-            with self._ppe_lock:
-                if self._ppe_overlay is not None:
-                    oh, ow = self._ppe_overlay.shape[:2]
-                    fh, fw = working_frame.shape[:2]
-                    if oh == fh and ow == fw:
-                        # Only copy pixels that differ from base (faster than full blend)
-                        mask = cv2.absdiff(self._ppe_overlay, frame)
-                        gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-                        _, thresh = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
-                        working_frame[thresh > 0] = self._ppe_overlay[thresh > 0]
+            # Paint cached PPE overlay onto the current working frame
+            if self._ppe_lock is not None:
+                with self._ppe_lock:
+                    if self._ppe_overlay is not None:
+                        oh, ow = self._ppe_overlay.shape[:2]
+                        fh, fw = working_frame.shape[:2]
+                        if oh == fh and ow == fw:
+                            # Simple: blit entire cached overlay
+                            # It already contains YOLO person boxes + PPE overlays
+                            import numpy as _np
+                            working_frame[:] = self._ppe_overlay
 
         # ── Fall detection ─────────────────────────────────────────────────
         if "fall_detection" in enabled:
