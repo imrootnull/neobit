@@ -140,6 +140,8 @@ class AnalyticsWorker:
     _ppe_overlay:     object = field(default=None, repr=False)   # last annotated frame crop
     _ppe_lock:        object = field(default=None, repr=False)   # threading.Lock
     _camera_id:       int    = field(default=0,    repr=False)   # alias for camera_id
+    _fall_frame_ctr:  int    = field(default=0,    repr=False)   # run fall every N frames
+    _fall_frame_skip: int    = field(default=3,    repr=False)
 
     def start(self):
         self.running   = True
@@ -209,7 +211,8 @@ class AnalyticsWorker:
             if frame is not None:
                 # PRODUCTION: process real frame
                 self._process_frame(frame, enabled)
-                time.sleep(0.1)
+                # No fixed sleep — let inference time be the natural rate limiter.
+                # yolov8n ~30ms = natural ~25 FPS cap on CPU
             else:
                 # DEVELOPMENT SIMULATOR: no camera connected
                 self._simulate_events(enabled)
@@ -229,10 +232,14 @@ class AnalyticsWorker:
             if need_persons and "person_detection" not in run_analytics:
                 # Force low-confidence person detection for cross-validation
                 run_analytics["person_detection"] = {"confidence": 0.25}
-            # Use yolov8m (medium) — significantly better than nano for partial/fisheye views
+            # yolov8n (nano) at imgsz=416: ~18ms vs yolov8m at 640: ~160ms
+            # Precision tradeoff is acceptable for person detection at typical
+            # surveillance distances. EPP uses its own dedicated models.
             if self._detector is None:
-                self._detector = YOLODetector("yolov8m.pt", "cpu", 0.25)
-            working_frame, detections = self._detector.detect(working_frame, run_analytics, draw=True)
+                self._detector = YOLODetector("yolov8n.pt", "cpu", 0.25)
+            working_frame, detections = self._detector.detect(
+                working_frame, run_analytics, draw=True, imgsz=416
+            )
             raw_persons = [d for d in detections if d["class"] == "person"]
             person_detections = [
                 d for d in raw_persons
@@ -283,13 +290,16 @@ class AnalyticsWorker:
                             import numpy as _np
                             working_frame[:] = self._ppe_overlay
 
-        # ── Fall detection ─────────────────────────────────────────────────
-        if "fall_detection" in enabled:
-            if self._fall_detector is None:
-                self._fall_detector = FallDetector("yolov8n-pose.pt", "cpu", 0.50)
-            fall_cfg = enabled["fall_detection"]
-            working_frame, falls = self._fall_detector.detect(working_frame, fall_cfg, draw=False)
-            self._evaluate_falls(falls, fall_cfg)
+        # ── Fall detection — pose model ~50ms, skip when no persons or every 3 frames
+        if "fall_detection" in enabled and person_detections:
+            self._fall_frame_ctr += 1
+            if self._fall_frame_ctr >= self._fall_frame_skip:
+                self._fall_frame_ctr = 0
+                if self._fall_detector is None:
+                    self._fall_detector = FallDetector("yolov8n-pose.pt", "cpu", 0.50)
+                fall_cfg = enabled["fall_detection"]
+                working_frame, falls = self._fall_detector.detect(working_frame, fall_cfg, draw=False)
+                self._evaluate_falls(falls, fall_cfg)
 
         # ── Face detection (only if YOLO confirmed plausible person) ───────────
         if "face_detection" in enabled and person_detections:

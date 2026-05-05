@@ -174,7 +174,8 @@ class YOLODetector:
     def detect(self,
                frame: np.ndarray,
                enabled_analytics: dict[str, dict],
-               draw: bool = True) -> tuple[np.ndarray, list[dict]]:
+               draw: bool = True,
+               imgsz: int = 640) -> tuple[np.ndarray, list[dict]]:
         """
         Run tracking+detection on a frame.
         Uses model.track() for persistent object IDs across frames.
@@ -211,13 +212,14 @@ class YOLODetector:
                 stream=False,
                 persist=True,     # maintain tracker state across calls
                 tracker="bytetrack.yaml",
+                imgsz=imgsz,
             )
         except Exception:
             # Fallback to plain detection if tracking unavailable
             try:
                 results = self._model(
                     frame, conf=min_conf, device=self.device,
-                    verbose=False, stream=False,
+                    verbose=False, stream=False, imgsz=imgsz,
                 )
             except Exception as e:
                 logger.warning(f"YOLO inference error: {e}")
