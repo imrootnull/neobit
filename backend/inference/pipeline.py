@@ -280,45 +280,27 @@ class AnalyticsWorker:
 
     def _run_epp_detection(self, frame, config: dict, person_detections: list | None = None):
         """
-        Model-based EPP detection with body-zone spatial analysis.
-        Per item determines:
-          - MISSING: model detected NO_xxx class
-          - MAL PORTADO: item detected but NOT in the correct body region (e.g., helmet in hand)
-          - CORRECTO: item detected in the expected body region
+        High-precision EPP detection with body-zone spatial validation.
+        Per required item determines:
+          - CORRECTO: item detected AND in the correct body region
+          - MAL PORTADO: item detected but in wrong body region (e.g., helmet in hand)
+          - FALTANTE: absence class detected OR required item never seen in frame
         """
         if self._ppe_detector is None:
             return
 
+        from backend.inference.ppe_detector import (
+            BODY_ZONES, ZONE_NAMES_ES, EPP_LABELS_ES
+        )
+
         working_frame, detections = self._ppe_detector.detect(frame, config, draw=True)
         frame[:] = working_frame
 
-        # ── Body zone definitions (fraction of person bbox height) ─────────────
-        CORRECT_ZONE: dict[str, tuple[float, float]] = {
-            "helmet":  (0.00, 0.28),   # head: top 28%
-            "goggles": (0.02, 0.30),   # eyes/face: top 30%
-            "mask":    (0.05, 0.35),   # face: 5–35%
-            "gloves":  (0.25, 0.95),   # hands: anywhere below shoulders
-            "shoes":   (0.65, 1.00),   # feet: bottom 35%
-        }
-        ZONE_NAMES: dict[str, str] = {
-            "helmet":  "cabeza",
-            "goggles": "ojos",
-            "mask":    "rostro",
-            "gloves":  "manos",
-            "shoes":   "pies",
-        }
-        KEY_ES: dict[str, str] = {
-            "helmet":  "casco",
-            "gloves":  "guantes",
-            "goggles": "gafas",
-            "mask":    "mascarilla",
-            "shoes":   "calzado",
-        }
-        required = config.get("required_ppe", ["helmet"])
+        required: list[str] = config.get("required_ppe", ["helmet"])
 
-        violations_missing: set[str]              = set()   # no_xxx detected
-        violations_misuse:  set[tuple[str, str]]  = set()   # item present but wrong zone
-        correctly_worn:     set[str]              = set()   # item in correct zone
+        # Track status per required EPP item
+        status: dict[str, str] = {k: "not_seen" for k in required}
+        misuse_zone: dict[str, str] = {}
 
         for det in detections:
             ppe_key = det["ppe_key"]
@@ -326,93 +308,102 @@ class AnalyticsWorker:
                 continue
 
             if not det["present"]:
-                violations_missing.add(ppe_key)
+                # Explicit "no_xxx" class — definitely missing
+                status[ppe_key] = "missing"
                 continue
 
-            # PPE detected — check spatial position relative to nearest person
+            # Item detected — check if it's in the correct body zone
             if not person_detections:
-                correctly_worn.add(ppe_key)   # can't determine; assume ok
+                # No person bbox available; can't do spatial check → assume correct
+                if status[ppe_key] != "missing":
+                    status[ppe_key] = "correct"
                 continue
 
             ex1, ey1, ex2, ey2 = det["bbox"]
-            epy_center = (ey1 + ey2) / 2
-            epx_center = (ex1 + ex2) / 2
+            ecy = (ey1 + ey2) / 2
+            ecx = (ex1 + ex2) / 2
 
-            # Find the person whose bbox horizontally overlaps or is nearest
-            best_person = None
-            best_score  = float('inf')
+            # Find nearest person by weighted distance (overlap bonus)
+            best_person, best_score = None, float("inf")
             for p in person_detections:
                 px1, py1, px2, py2 = p["bbox"]
                 pcx = (px1 + px2) / 2
-                pcy = (py1 + py2) / 2
-                dist = abs(epx_center - pcx) + abs(epy_center - pcy)
-                # Bonus if EPP center is within person bbox horizontally
-                if px1 <= epx_center <= px2:
-                    dist *= 0.4
+                dist = abs(ecx - pcx) + abs(ecy - (py1 + py2) / 2)
+                if px1 <= ecx <= px2:
+                    dist *= 0.3   # strong bonus for horizontal overlap
                 if dist < best_score:
                     best_score  = dist
                     best_person = p
 
             if best_person is None:
-                correctly_worn.add(ppe_key)
+                if status[ppe_key] != "missing":
+                    status[ppe_key] = "correct"
                 continue
 
             bx1, by1, bx2, by2 = best_person["bbox"]
             ph    = max(by2 - by1, 1)
-            rel_y = (epy_center - by1) / ph   # 0 = top of person, 1 = bottom
+            rel_y = (ecy - by1) / ph
 
-            zone = CORRECT_ZONE.get(ppe_key, (0.0, 1.0))
-            if zone[0] <= rel_y <= zone[1]:
-                correctly_worn.add(ppe_key)
-                # Draw green tick on the live frame to confirm correct wear
+            zone      = BODY_ZONES.get(ppe_key, (0.0, 1.0))
+            in_zone   = zone[0] <= rel_y <= zone[1]
+
+            if in_zone:
+                status[ppe_key] = "correct"
                 import cv2 as _cv2
-                ex1i, ey1i, ex2i, ey2i = [int(v) for v in det["bbox"]]
-                _cv2.putText(frame, f"{KEY_ES.get(ppe_key, ppe_key)} OK ✓",
-                             (ex1i, ey1i - 4), _cv2.FONT_HERSHEY_DUPLEX,
-                             0.38, (0, 200, 60), 1, _cv2.LINE_AA)
+                x1i, y1i = int(ex1), int(ey1)
+                es = EPP_LABELS_ES.get(ppe_key, ppe_key)
+                _cv2.putText(frame, f"{es} ✓", (x1i, y1i - 5),
+                             _cv2.FONT_HERSHEY_DUPLEX, 0.38, (0, 200, 60), 1, _cv2.LINE_AA)
             else:
-                zone_name = ZONE_NAMES.get(ppe_key, "posición correcta")
-                violations_misuse.add((ppe_key, zone_name))
-                # Draw amber warning for misuse
+                if status[ppe_key] != "missing":
+                    status[ppe_key] = "misuse"
+                    misuse_zone[ppe_key] = ZONE_NAMES_ES.get(ppe_key, "posición correcta")
                 import cv2 as _cv2
-                ex1i, ey1i, ex2i, ey2i = [int(v) for v in det["bbox"]]
-                _cv2.rectangle(frame, (ex1i, ey1i), (ex2i, ey2i), (0, 140, 230), 2)
-                _cv2.putText(frame, f"Mal portado: {KEY_ES.get(ppe_key, ppe_key)}",
-                             (ex1i, ey1i - 4), _cv2.FONT_HERSHEY_DUPLEX,
+                x1i, y1i, x2i, y2i = int(ex1), int(ey1), int(ex2), int(ey2)
+                es = EPP_LABELS_ES.get(ppe_key, ppe_key)
+                _cv2.rectangle(frame, (x1i, y1i), (x2i, y2i), (0, 140, 230), 2)
+                _cv2.putText(frame, f"{es}: mal portado",
+                             (x1i, y1i - 5), _cv2.FONT_HERSHEY_DUPLEX,
                              0.38, (0, 140, 230), 1, _cv2.LINE_AA)
+
+        # Items never seen → mark as missing (not detected at all)
+        for k in required:
+            if status[k] == "not_seen":
+                status[k] = "missing"
 
         # Status bar under each person bbox
         import cv2 as _cv2
-        h_frame = frame.shape[0]
         if person_detections:
-            misuse_keys = {k for k, _ in violations_misuse}
             for p in person_detections:
                 bx1, by1, bx2, by2 = p["bbox"]
-                label_y = min(by2 + 16, h_frame - 4)
-                all_ok  = not violations_misuse and not violations_missing
+                label_y = min(by2 + 16, frame.shape[0] - 4)
+                all_ok  = all(v == "correct" for v in status.values())
                 color   = (0, 200, 60) if all_ok else (0, 60, 220)
                 parts   = []
-                for k in sorted(violations_missing):
-                    parts.append(f"sin {KEY_ES.get(k, k)}")
-                for k, zn in sorted(violations_misuse):
-                    parts.append(f"{KEY_ES.get(k, k)} no en {zn}")
-                label = "EPP correcto" if all_ok else "EPP: " + ", ".join(parts[:2])
+                for k, s in status.items():
+                    es = EPP_LABELS_ES.get(k, k)
+                    if s == "missing":
+                        parts.append(f"sin {es}")
+                    elif s == "misuse":
+                        parts.append(f"{es} mal portado")
+                label = "EPP correcto ✓" if all_ok else "EPP: " + ", ".join(parts[:3])
                 _cv2.putText(frame, label, (bx1 + 2, label_y),
                              _cv2.FONT_HERSHEY_DUPLEX, 0.40, color, 1, _cv2.LINE_AA)
 
-        # Fire events
-        if (violations_missing or violations_misuse) and self._rate_limit_ok("epp_detection", config):
-            min_conf   = config.get("confidence", 0.70)
-            n_viol     = len(violations_missing) + len(violations_misuse)
-            confidence = round(min(0.96, 0.72 + n_viol * 0.05), 2)
-            if confidence >= min_conf:
-                parts = []
-                for k in sorted(violations_missing):
-                    parts.append(f"{KEY_ES.get(k, k)} faltante")
-                for k, zn in sorted(violations_misuse):
-                    parts.append(f"{KEY_ES.get(k, k)} mal portado (no en {zn})")
-                self._emit_event("epp_detection", confidence, "; ".join(parts), config)
-
+        # Fire event if any violation
+        violations = {k: v for k, v in status.items() if v in ("missing", "misuse")}
+        if violations and self._rate_limit_ok("epp_detection", config):
+            n     = len(violations)
+            conf  = round(min(0.97, 0.75 + n * 0.06), 2)
+            parts = []
+            for k, s in violations.items():
+                es = EPP_LABELS_ES.get(k, k)
+                if s == "missing":
+                    parts.append(f"{es} faltante")
+                else:
+                    zone = misuse_zone.get(k, ZONE_NAMES_ES.get(k, ""))
+                    parts.append(f"{es} mal portado (debe ir en {zone})")
+            self._emit_event("epp_detection", conf, "; ".join(parts), config)
 
 
     def _run_face_detection(self, frame, config: dict, person_detections: list | None = None):

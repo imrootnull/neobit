@@ -1,14 +1,14 @@
 """
-PPE Detector — model-based Personal Protective Equipment detection.
+PPE Detector — High-precision Personal Protective Equipment detection.
 
-Uses a pre-trained YOLOv8 model (keremberke/yolov8n-safety-equipment-detection)
-downloaded from HuggingFace Hub on first use (~6 MB).
+Uses keremberke/yolov8m-protective-equipment-detection (medium model, ~50 MB)
+for significantly better recall and precision than the nano variant.
 
-Detected classes:
-  Positive (PPE present): Hardhat, Safety Vest, Mask, Safety Cone
-  Negative (PPE missing): NO-Hardhat, NO-Safety Vest, NO-Mask
+Detected classes vary by model — we map them to canonical EPP keys:
+  helmet, vest, gloves, goggles, mask, shoes, overalls
 
-This approach is color/brand agnostic — works for any client's PPE equipment.
+Placement is validated against body-zone spatial analysis when a person
+bounding box is available from YOLO.
 """
 from __future__ import annotations
 
@@ -19,78 +19,158 @@ import numpy as np
 from typing import Optional
 from loguru import logger
 
-# ─── Model source ─────────────────────────────────────────────────────────────
-
-HF_REPO     = "keremberke/yolov8n-protective-equipment-detection"
+# ─── Model variants ────────────────────────────────────────────────────────────
+# Use medium model for much better precision than nano
+HF_REPO     = "keremberke/yolov8m-protective-equipment-detection"
 HF_FILENAME = "best.pt"
 
-# ─── Class maps ──────────────────────────────────────────────────────────────
+# Fallback if medium not available
+HF_REPO_FALLBACK = "keremberke/yolov8n-protective-equipment-detection"
 
-# Map model class names (lowercase) → our EPP item key
-# Model classes: helmet, no_helmet, glove, no_glove, goggles, no_goggles,
-#                mask, no_mask, shoes, no_shoes
-PPE_PRESENT = {
-    "helmet":   "helmet",
-    "glove":    "gloves",
-    "goggles":  "goggles",
-    "mask":     "mask",
-    "shoes":    "shoes",
-}
-PPE_ABSENT = {
-    "no_helmet":  "helmet",
-    "no_glove":   "gloves",
-    "no_goggles": "goggles",
-    "no_mask":    "mask",
-    "no_shoes":   "shoes",
+# ─── Class maps ───────────────────────────────────────────────────────────────
+# Map model class names (lowercase, normalized) → canonical EPP key
+# The medium model may have slightly different class names — handle both
+PPE_PRESENT: dict[str, str] = {
+    # Helmets / hard hats
+    "helmet":          "helmet",
+    "hardhat":         "helmet",
+    "hard hat":        "helmet",
+    "hard_hat":        "helmet",
+    # Safety vest
+    "vest":            "vest",
+    "safety vest":     "vest",
+    "safety_vest":     "vest",
+    "jacket":          "vest",
+    # Gloves
+    "glove":           "gloves",
+    "gloves":          "gloves",
+    # Goggles / safety glasses
+    "goggles":         "goggles",
+    "glasses":         "goggles",
+    "safety glasses":  "goggles",
+    "safety_glasses":  "goggles",
+    # Mask
+    "mask":            "mask",
+    "face mask":       "mask",
+    "face_mask":       "mask",
+    # Footwear
+    "shoes":           "shoes",
+    "boots":           "shoes",
+    "safety shoes":    "shoes",
+    "safety_shoes":    "shoes",
+    # Overalls
+    "overalls":        "overalls",
+    "coverall":        "overalls",
+    "coveralls":       "overalls",
 }
 
-# Colors for drawing (BGR)
+PPE_ABSENT: dict[str, str] = {
+    "no_helmet":        "helmet",
+    "no-helmet":        "helmet",
+    "no_hardhat":       "helmet",
+    "no-hardhat":       "helmet",
+    "no_vest":          "vest",
+    "no-vest":          "vest",
+    "no_safety_vest":   "vest",
+    "no-safety-vest":   "vest",
+    "no_glove":         "gloves",
+    "no-glove":         "gloves",
+    "no_gloves":        "gloves",
+    "no-gloves":        "gloves",
+    "no_goggles":       "goggles",
+    "no-goggles":       "goggles",
+    "no_mask":          "mask",
+    "no-mask":          "mask",
+    "no_shoes":         "shoes",
+    "no-shoes":         "shoes",
+    "no_overalls":      "overalls",
+    "no-overalls":      "overalls",
+}
+
+# Human-readable Spanish labels for each EPP key
+EPP_LABELS_ES: dict[str, str] = {
+    "helmet":   "Casco",
+    "vest":     "Chaleco",
+    "gloves":   "Guantes",
+    "goggles":  "Lentes",
+    "mask":     "Mascarilla",
+    "shoes":    "Botas",
+    "overalls": "Overol",
+}
+
+# Body zone: (top_frac, bottom_frac) of person bounding box height where item MUST appear
+# 0.0 = top of person bbox, 1.0 = bottom
+BODY_ZONES: dict[str, tuple[float, float]] = {
+    "helmet":   (0.00, 0.25),   # head: top 25%
+    "goggles":  (0.02, 0.28),   # face/eyes: top 28%
+    "mask":     (0.05, 0.30),   # lower face: 5–30%
+    "vest":     (0.15, 0.75),   # torso: 15–75%
+    "gloves":   (0.40, 1.00),   # hands/forearms: lower 60%
+    "shoes":    (0.70, 1.00),   # feet: bottom 30%
+    "overalls": (0.05, 1.00),   # full body: 5–100%
+}
+
+ZONE_NAMES_ES: dict[str, str] = {
+    "helmet":   "cabeza",
+    "goggles":  "cara",
+    "mask":     "cara",
+    "vest":     "torso",
+    "gloves":   "manos",
+    "shoes":    "pies",
+    "overalls": "cuerpo",
+}
+
+# Colors (BGR)
 COLOR_OK      = (0,   210,  80)   # green
-COLOR_MISSING = (0,    60, 230)   # red
-COLOR_INFO    = (200, 180,  50)   # amber (neutral info)
+COLOR_MISSING = (0,    50, 220)   # red
+COLOR_MISUSE  = (0,   140, 230)   # amber
+COLOR_TEXT    = (255, 255, 255)
 
 FONT       = cv2.FONT_HERSHEY_DUPLEX
 FONT_SCALE = 0.42
 THICKNESS  = 1
 
 
-# ─── Singleton model loader ───────────────────────────────────────────────────
+# ─── Singleton model loader ──────────────────────────────────────────────────
 
 _model_cache: dict[str, object] = {}
 _model_lock  = threading.Lock()
 
 
-def _load_ppe_model() -> Optional[object]:
-    """Download and cache the PPE YOLO model. Returns None if unavailable."""
-    with _model_lock:
-        if HF_REPO in _model_cache:
-            return _model_cache[HF_REPO]
-
-        try:
-            from huggingface_hub import hf_hub_download
-            logger.info(f"Downloading PPE model from HuggingFace: {HF_REPO}")
-            model_path = hf_hub_download(repo_id=HF_REPO, filename=HF_FILENAME)
-            from ultralytics import YOLO
-            model = YOLO(model_path)
-            _model_cache[HF_REPO] = model
-            logger.success(f"PPE model loaded: {HF_REPO}")
-            return model
-        except ImportError:
-            logger.warning("huggingface_hub not installed — PPE model unavailable")
-        except Exception as e:
-            logger.warning(f"PPE model download failed: {e}")
-
-        _model_cache[HF_REPO] = None
+def _try_load(repo: str, filename: str):
+    try:
+        from huggingface_hub import hf_hub_download
+        from ultralytics import YOLO
+        logger.info(f"Downloading PPE model: {repo}")
+        path = hf_hub_download(repo_id=repo, filename=filename)
+        model = YOLO(path)
+        logger.success(f"PPE model loaded: {repo}")
+        return model
+    except Exception as e:
+        logger.warning(f"PPE model {repo} failed: {e}")
         return None
 
 
-# ─── PPE Detector class ───────────────────────────────────────────────────────
+def _load_ppe_model():
+    with _model_lock:
+        if "ppe" in _model_cache:
+            return _model_cache["ppe"]
+        model = _try_load(HF_REPO, HF_FILENAME)
+        if model is None:
+            model = _try_load(HF_REPO_FALLBACK, HF_FILENAME)
+        _model_cache["ppe"] = model
+        return model
+
+
+# ─── PPE Detector ────────────────────────────────────────────────────────────
 
 class PPEDetector:
     """
-    Detects PPE items (helmet, vest, mask…) using a dedicated YOLO model.
-    Works regardless of PPE color, brand, or style.
-    Falls back to a banner overlay when the model is not available.
+    High-precision PPE detector using YOLOv8m trained on safety equipment.
+    Detects whether each required EPP item is:
+      - PRESENT and correctly placed (correct body zone)
+      - PRESENT but misplaced (helmet in hand, etc.)
+      - ABSENT (no_xxx class detected, or required but never seen)
     """
 
     def __init__(self, device: str = "cpu", conf_threshold: float = 0.25):
@@ -98,8 +178,8 @@ class PPEDetector:
         self.conf_threshold = conf_threshold
         self._model         = None
         self._model_ready   = False
-        # Start model loading in background so it doesn't block startup
-        threading.Thread(target=self._init_model, daemon=True).start()
+        threading.Thread(target=self._init_model, daemon=True,
+                         name="ppe-model-load").start()
 
     def _init_model(self):
         self._model       = _load_ppe_model()
@@ -115,60 +195,74 @@ class PPEDetector:
         Run PPE detection on a frame.
 
         Returns:
-            (annotated_frame, results)
-            results: list of {
-                'class': str,       # 'Hardhat', 'NO-Hardhat', 'Safety Vest', etc.
-                'ppe_key': str,     # 'helmet', 'vest', 'mask'
-                'present': bool,    # True if PPE detected, False if missing
+            (annotated_frame, detections)
+            detections: [{
+                'class':      str,    # raw model class name
+                'ppe_key':   str,    # canonical key: helmet/vest/gloves/…
+                'present':   bool,   # True=PPE present, False=PPE missing
                 'confidence': float,
-                'bbox': [x1,y1,x2,y2]
-            }
+                'bbox':       [x1,y1,x2,y2]
+            }]
         """
         if not self._model_ready or self._model is None:
-            # Model still loading or unavailable — return frame unchanged
             return frame, []
 
         conf = config.get("confidence", self.conf_threshold)
 
         try:
             results = self._model(
-                frame,
-                conf=conf,
-                device=self.device,
-                verbose=False,
-                stream=False,
+                frame, conf=conf, device=self.device,
+                verbose=False, stream=False,
             )
         except Exception as e:
             logger.warning(f"PPE inference error: {e}")
             return frame, []
 
-        annotated = frame.copy() if draw else frame
+        annotated  = frame.copy() if draw else frame
         detections: list[dict] = []
 
         for result in results:
             boxes = result.boxes
             if boxes is None:
                 continue
+            names = result.names or {}
             for box in boxes:
                 cls_id   = int(box.cls[0])
-                cls_name = result.names.get(cls_id, "").lower().strip()
+                raw_name = names.get(cls_id, "").lower().strip()
                 conf_val = float(box.conf[0])
                 xyxy     = box.xyxy[0].cpu().numpy().astype(int)
                 x1, y1, x2, y2 = xyxy
 
-                # Skip 'person', 'vehicle', 'machinery', 'safety cone' (non-PPE status)
-                if cls_name in ("person", "machinery", "vehicle", "safety cone"):
+                # Skip non-EPP classes
+                if raw_name in ("person", "machinery", "vehicle",
+                                "safety cone", "cone"):
                     continue
 
-                present = cls_name in PPE_PRESENT
-                absent  = cls_name in PPE_ABSENT
+                present = raw_name in PPE_PRESENT
+                absent  = raw_name in PPE_ABSENT
                 if not present and not absent:
-                    continue
-
-                ppe_key = PPE_PRESENT.get(cls_name) or PPE_ABSENT.get(cls_name)
+                    # Try partial match for edge cases
+                    matched_key = None
+                    for k, v in PPE_PRESENT.items():
+                        if k in raw_name or raw_name in k:
+                            matched_key = v
+                            present = True
+                            break
+                    if not matched_key:
+                        for k, v in PPE_ABSENT.items():
+                            if k in raw_name or raw_name in k:
+                                matched_key = v
+                                absent = True
+                                break
+                    if not matched_key:
+                        logger.trace(f"PPE unknown class: {raw_name}")
+                        continue
+                    ppe_key = matched_key
+                else:
+                    ppe_key = PPE_PRESENT.get(raw_name) or PPE_ABSENT.get(raw_name)
 
                 detections.append({
-                    "class":      cls_name,
+                    "class":      raw_name,
                     "ppe_key":    ppe_key,
                     "present":    present,
                     "confidence": conf_val,
@@ -177,38 +271,19 @@ class PPEDetector:
 
                 if draw:
                     color = COLOR_OK if present else COLOR_MISSING
-                    label_map = {
-                        "helmet":     "Casco ✓",
-                        "no_helmet":  "Sin casco",
-                        "glove":      "Guantes ✓",
-                        "no_glove":   "Sin guantes",
-                        "goggles":    "Gafas ✓",
-                        "no_goggles": "Sin gafas",
-                        "mask":       "Mascarilla ✓",
-                        "no_mask":    "Sin mascarilla",
-                        "shoes":      "Calzado ✓",
-                        "no_shoes":   "Sin calzado",
-                    }
-                    label = label_map.get(cls_name, cls_name.title())
-                    self._draw_ppe_box(annotated, x1, y1, x2, y2, label, conf_val, color)
+                    es    = EPP_LABELS_ES.get(ppe_key, ppe_key.title())
+                    label = f"{es} ✓" if present else f"Sin {es}"
+                    self._draw_box(annotated, x1, y1, x2, y2,
+                                   label, conf_val, color)
 
         return annotated, detections
 
     @staticmethod
-    def _draw_ppe_box(frame, x1, y1, x2, y2, label: str, conf: float, color: tuple):
-        """Draw a bounding box with label for a PPE detection."""
+    def _draw_box(frame, x1, y1, x2, y2, label: str, conf: float, color: tuple):
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
         text = f"{label} {conf:.0%}"
         (tw, th), _ = cv2.getTextSize(text, FONT, FONT_SCALE, THICKNESS)
         ly1 = max(y1 - th - 6, 0)
-        ly2 = y1
-
-        # Label background
-        cv2.rectangle(frame, (x1, ly1), (x1 + tw + 6, ly2), color, -1)
-        # Label text
-        cv2.putText(
-            frame, text,
-            (x1 + 3, ly2 - 3),
-            FONT, FONT_SCALE, (10, 10, 10), THICKNESS, cv2.LINE_AA,
-        )
+        cv2.rectangle(frame, (x1, ly1), (x1 + tw + 6, y1), color, -1)
+        cv2.putText(frame, text, (x1 + 3, y1 - 3),
+                    FONT, FONT_SCALE, (10, 10, 10), THICKNESS, cv2.LINE_AA)

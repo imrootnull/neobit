@@ -357,35 +357,60 @@ function ParamsPanel({ analytic, catColor, saving, onSave }) {
         </div>
 
         {/* EPP-specific */}
-        {'required_ppe' in local && (
-          <div className="form-group" style={{ flex: '1 1 100%', marginBottom: 0 }}>
-            <label className="form-label" style={{ fontSize: 11 }}>EPP requerido</label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {['helmet', 'vest', 'boots', 'gloves', 'goggles', 'harness'].map(item => {
-                const labels = { helmet: 'Casco', vest: 'Chaleco', boots: 'Botas', gloves: 'Guantes', goggles: 'Lentes', harness: 'Arnés' };
-                const checked = (local.required_ppe || []).includes(item);
-                return (
-                  <label key={item} style={{
-                    display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
-                    padding: '3px 9px', borderRadius: 6, fontSize: 12,
-                    background: checked ? catColor + '22' : 'rgba(255,255,255,0.04)',
-                    border: `1px solid ${checked ? catColor + '55' : 'var(--border)'}`,
-                    color: checked ? catColor : 'var(--text-muted)',
-                  }}>
-                    <input type="checkbox" style={{ display: 'none' }}
-                      checked={checked}
-                      onChange={() => {
-                        const arr = local.required_ppe || [];
-                        set('required_ppe', checked ? arr.filter(x => x !== item) : [...arr, item]);
-                      }}
-                    />
-                    {labels[item]}
-                  </label>
-                );
-              })}
+        {'required_ppe' in local && (() => {
+          const EPP_ITEMS = [
+            { key: 'helmet',   label: 'Casco',       zone: 'cabeza',  icon: '🪖' },
+            { key: 'vest',     label: 'Chaleco',      zone: 'torso',   icon: '🦺' },
+            { key: 'gloves',   label: 'Guantes',      zone: 'manos',   icon: '🧤' },
+            { key: 'goggles',  label: 'Lentes',       zone: 'cara',    icon: '🥽' },
+            { key: 'mask',     label: 'Mascarilla',   zone: 'cara',    icon: '😷' },
+            { key: 'shoes',    label: 'Botas',        zone: 'pies',    icon: '👢' },
+            { key: 'overalls', label: 'Overol',       zone: 'cuerpo',  icon: '👔' },
+          ];
+          return (
+            <div className="form-group" style={{ flex: '1 1 100%', marginBottom: 0 }}>
+              <label className="form-label" style={{ fontSize: 11 }}>
+                EPP requerido — se valida colocación correcta en zona corporal
+              </label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {EPP_ITEMS.map(({ key, label, zone, icon }) => {
+                  const checked = (local.required_ppe || []).includes(key);
+                  return (
+                    <label key={key} style={{
+                      display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                      padding: '5px 11px', borderRadius: 8, fontSize: 12,
+                      background: checked ? catColor + '22' : 'rgba(255,255,255,0.04)',
+                      border: `1px solid ${checked ? catColor + '66' : 'var(--border)'}`,
+                      color: checked ? catColor : 'var(--text-muted)',
+                      transition: 'all 0.15s',
+                      userSelect: 'none',
+                    }}>
+                      <input type="checkbox" style={{ display: 'none' }}
+                        checked={checked}
+                        onChange={() => {
+                          const arr = local.required_ppe || [];
+                          set('required_ppe', checked ? arr.filter(x => x !== key) : [...arr, key]);
+                        }}
+                      />
+                      <span style={{ fontSize: 15 }}>{icon}</span>
+                      <span style={{ fontWeight: 600 }}>{label}</span>
+                      <span style={{
+                        fontSize: 10, opacity: 0.7,
+                        background: 'rgba(0,0,0,0.2)', borderRadius: 4,
+                        padding: '1px 5px',
+                      }}>{zone}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              {(local.required_ppe || []).length === 0 && (
+                <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 6 }}>
+                  ⚠️ Selecciona al menos un EPP para activar la detección de incumplimiento
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Crowd max density */}
         {'max_density' in local && (
