@@ -233,10 +233,10 @@ class AnalyticsWorker:
                          f"plausible={len(person_detections)}")
             self._evaluate_detections(detections, yolo_analytics)
 
-        # ── EPP detection — runs on FULL frame, no person required ──────────────
-        # EPP model directly detects helmets, vests, etc. in the scene.
-        # If a person is present (YOLO confirmed), we add spatial body-zone analysis.
-        if "epp_detection" in enabled:
+        # ── EPP detection — only when at least one plausible person is in frame ──
+        # Without a confirmed person there is no one to enforce EPP on, and the
+        # model produces false detections against background objects.
+        if "epp_detection" in enabled and person_detections:
             if self._ppe_detector is None:
                 self._ppe_detector = PPEDetector(
                     device="cpu",
@@ -282,11 +282,18 @@ class AnalyticsWorker:
         """
         High-precision EPP detection with body-zone spatial validation.
         Draws color-coded overlays on each detected EPP item:
-          ✓ green   — item detected AND in correct body zone
-          ! amber   — item detected but in wrong body zone (mal portado)
-          ✗ red     — item absent (no_xxx class) or required but not seen
+          green  — item detected AND in correct body zone
+          amber  — item detected but in wrong body zone (mal portado)
+          red    — item absent (no_xxx class) or required but not seen
+
+        REQUIRES at least one YOLO-confirmed person in the frame.
+        Without a person there is nobody to enforce EPP on, and the model
+        generates false positives against background objects (walls, shelves).
         """
         if self._ppe_detector is None:
+            return
+        # Hard guard: never run without a confirmed person
+        if not person_detections:
             return
 
         from backend.inference.ppe_detector import (
