@@ -1,14 +1,17 @@
 """
 PPE Detector — High-precision Personal Protective Equipment detection.
 
-Uses keremberke/yolov8m-protective-equipment-detection (medium model, ~50 MB)
-for significantly better recall and precision than the nano variant.
+Uses TWO complementary models:
+  PRIMARY:   Tanishjain9/yolov8n-ppe-detection-6classes
+             Classes: Gloves, Vest, goggles, helmet, mask, safety_shoe
+             Fine-tuned on Construction Site Safety dataset (Roboflow)
 
-Detected classes vary by model — we map them to canonical EPP keys:
-  helmet, vest, gloves, goggles, mask, shoes, overalls
+  SECONDARY: keremberke/yolov8m-protective-equipment-detection
+             Classes: glove, goggles, helmet, mask, no_glove, no_goggles,
+                      no_helmet, no_mask, no_shoes, shoes
+             Used for 'no_xxx' absence signals (helmet/glove/goggles/mask)
 
-Placement is validated against body-zone spatial analysis when a person
-bounding box is available from YOLO.
+Both models run on every frame; results are merged.
 """
 from __future__ import annotations
 
@@ -19,13 +22,14 @@ import numpy as np
 from typing import Optional
 from loguru import logger
 
-# ─── Model variants ────────────────────────────────────────────────────────────
-# Use medium model for much better precision than nano
-HF_REPO     = "keremberke/yolov8m-protective-equipment-detection"
-HF_FILENAME = "best.pt"
+# ─── Model repos ──────────────────────────────────────────────────────────────
+# Primary model — has Vest/Gloves/goggles/helmet/mask/safety_shoe
+HF_PRIMARY_REPO = "Tanishjain9/yolov8n-ppe-detection-6classes"
+HF_PRIMARY_FILE = "best.pt"
 
-# Fallback if medium not available
-HF_REPO_FALLBACK = "keremberke/yolov8n-protective-equipment-detection"
+# Secondary model — has no_xxx absence classes (glove,goggles,helmet,mask,shoes)
+HF_SECONDARY_REPO = "keremberke/yolov8m-protective-equipment-detection"
+HF_SECONDARY_FILE = "best.pt"
 
 # ─── Class maps ───────────────────────────────────────────────────────────────
 # Map model class names (lowercase, normalized) → canonical EPP key
@@ -172,38 +176,48 @@ def _try_load(repo: str, filename: str):
         return None
 
 
-def _load_ppe_model():
+def _load_ppe_models() -> tuple:
+    """Load primary (6-class) and secondary (absence) models."""
     with _model_lock:
-        if "ppe" in _model_cache:
-            return _model_cache["ppe"]
-        model = _try_load(HF_REPO, HF_FILENAME)
-        if model is None:
-            model = _try_load(HF_REPO_FALLBACK, HF_FILENAME)
-        _model_cache["ppe"] = model
-        return model
+        if "ppe_primary" in _model_cache:
+            return _model_cache["ppe_primary"], _model_cache.get("ppe_secondary")
+
+        primary = _try_load(HF_PRIMARY_REPO, HF_PRIMARY_FILE)
+        if primary is None:
+            # Final fallback: keremberke nano
+            primary = _try_load("keremberke/yolov8n-protective-equipment-detection", "best.pt")
+        _model_cache["ppe_primary"] = primary
+
+        secondary = _try_load(HF_SECONDARY_REPO, HF_SECONDARY_FILE)
+        _model_cache["ppe_secondary"] = secondary
+
+        logger.info(f"PPE models ready — primary: {'OK' if primary else 'FAIL'}, secondary: {'OK' if secondary else 'FAIL'}")
+        return primary, secondary
 
 
 # ─── PPE Detector ────────────────────────────────────────────────────────────
 
 class PPEDetector:
     """
-    High-precision PPE detector using YOLOv8m trained on safety equipment.
-    Detects whether each required EPP item is:
-      - PRESENT and correctly placed (correct body zone)
-      - PRESENT but misplaced (helmet in hand, etc.)
-      - ABSENT (no_xxx class detected, or required but never seen)
+    Dual-model PPE detector:
+      PRIMARY:   Tanishjain9/yolov8n-ppe-detection-6classes
+                 Detects Gloves, Vest, goggles, helmet, mask, safety_shoe
+      SECONDARY: keremberke/yolov8m-protective-equipment-detection
+                 Provides no_xxx absence signals for helmet, gloves, goggles, mask
+    Results from both models are merged before spatial zone analysis.
     """
 
     def __init__(self, device: str = "cpu", conf_threshold: float = 0.25):
-        self.device         = device
-        self.conf_threshold = conf_threshold
-        self._model         = None
-        self._model_ready   = False
+        self.device          = device
+        self.conf_threshold  = conf_threshold
+        self._primary        = None
+        self._secondary      = None
+        self._model_ready    = False
         threading.Thread(target=self._init_model, daemon=True,
                          name="ppe-model-load").start()
 
     def _init_model(self):
-        self._model       = _load_ppe_model()
+        self._primary, self._secondary = _load_ppe_models()
         self._model_ready = True
 
     def detect(
@@ -213,82 +227,84 @@ class PPEDetector:
         draw: bool = True,
     ) -> tuple[np.ndarray, list[dict]]:
         """
-        Run PPE detection on a frame.
+        Run PPE detection using both models and return merged detections.
 
         Returns:
-            (annotated_frame, detections)
+            (frame, detections)
             detections: [{
-                'class':      str,    # raw model class name
-                'ppe_key':   str,    # canonical key: helmet/vest/gloves/…
-                'present':   bool,   # True=PPE present, False=PPE missing
+                'class':      str,   # raw model class name
+                'ppe_key':    str,   # canonical key: helmet/vest/gloves/…
+                'present':    bool,  # True=PPE present, False=absent signal
                 'confidence': float,
                 'bbox':       [x1,y1,x2,y2]
             }]
         """
-        if not self._model_ready or self._model is None:
+        if not self._model_ready or self._primary is None:
             return frame, []
 
         conf = config.get("confidence", self.conf_threshold)
-
-        try:
-            results = self._model(
-                frame, conf=conf, device=self.device,
-                verbose=False, stream=False,
-            )
-        except Exception as e:
-            logger.warning(f"PPE inference error: {e}")
-            return frame, []
-
-        annotated  = frame.copy() if draw else frame
         detections: list[dict] = []
 
-        for result in results:
-            boxes = result.boxes
-            if boxes is None:
+        # ── Run each loaded model ─────────────────────────────────────────────
+        models_to_run = [m for m in (self._primary, self._secondary) if m is not None]
+        for model in models_to_run:
+            try:
+                results = model(
+                    frame, conf=conf, device=self.device,
+                    verbose=False, stream=False,
+                )
+            except Exception as e:
+                logger.warning(f"PPE inference error: {e}")
                 continue
-            names = result.names or {}
-            for box in boxes:
-                cls_id   = int(box.cls[0])
-                raw_name = names.get(cls_id, "").lower().strip()
-                conf_val = float(box.conf[0])
-                xyxy     = box.xyxy[0].cpu().numpy().astype(int)
-                x1, y1, x2, y2 = xyxy
 
-                # Skip non-EPP classes
-                if raw_name in ("person", "machinery", "vehicle",
-                                "safety cone", "cone"):
+            for result in results:
+                boxes = result.boxes
+                if boxes is None:
                     continue
+                names = result.names or {}
+                for box in boxes:
+                    cls_id   = int(box.cls[0])
+                    raw_name = names.get(cls_id, "").lower().strip()
+                    conf_val = float(box.conf[0])
+                    xyxy     = box.xyxy[0].cpu().numpy().astype(int)
+                    x1, y1, x2, y2 = xyxy
 
-                present = raw_name in PPE_PRESENT
-                absent  = raw_name in PPE_ABSENT
-                if not present and not absent:
-                    # Try partial match for edge cases
-                    matched_key = None
-                    for k, v in PPE_PRESENT.items():
-                        if k in raw_name or raw_name in k:
-                            matched_key = v
-                            present = True
-                            break
-                    if not matched_key:
-                        for k, v in PPE_ABSENT.items():
+                    # Skip non-EPP classes
+                    if raw_name in ("person", "machinery", "vehicle",
+                                    "safety cone", "cone", "worker"):
+                        continue
+
+                    present = raw_name in PPE_PRESENT
+                    absent  = raw_name in PPE_ABSENT
+
+                    if not present and not absent:
+                        # Try partial / substring match
+                        matched_key = None
+                        for k, v in PPE_PRESENT.items():
                             if k in raw_name or raw_name in k:
                                 matched_key = v
-                                absent = True
+                                present = True
                                 break
-                    if not matched_key:
-                        logger.trace(f"PPE unknown class: {raw_name}")
-                        continue
-                    ppe_key = matched_key
-                else:
-                    ppe_key = PPE_PRESENT.get(raw_name) or PPE_ABSENT.get(raw_name)
+                        if not matched_key:
+                            for k, v in PPE_ABSENT.items():
+                                if k in raw_name or raw_name in k:
+                                    matched_key = v
+                                    absent = True
+                                    break
+                        if not matched_key:
+                            logger.trace(f"PPE unknown class: '{raw_name}'")
+                            continue
+                        ppe_key = matched_key
+                    else:
+                        ppe_key = PPE_PRESENT.get(raw_name) or PPE_ABSENT.get(raw_name)
 
-                detections.append({
-                    "class":      raw_name,
-                    "ppe_key":    ppe_key,
-                    "present":    present,
-                    "confidence": conf_val,
-                    "bbox":       [int(x1), int(y1), int(x2), int(y2)],
-                })
+                    detections.append({
+                        "class":      raw_name,
+                        "ppe_key":    ppe_key,
+                        "present":    present,
+                        "confidence": conf_val,
+                        "bbox":       [int(x1), int(y1), int(x2), int(y2)],
+                    })
 
         return frame, detections
 
