@@ -6,7 +6,9 @@ import {
   AlertTriangle, CheckCircle, Clock, X, ZoomIn
 } from 'lucide-react';
 
-const API = (path: string) => `http://localhost:8000${path}`;
+// Relative base — works from any PC on the LAN (no hardcoded IP)
+const API = (path: string) => `${window.location.origin}${path}`;
+
 
 const ANALYTIC_LABELS: Record<string, string> = {
   face_detection: 'Rostro', person_detection: 'Persona',

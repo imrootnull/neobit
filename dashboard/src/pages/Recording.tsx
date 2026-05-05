@@ -3,7 +3,8 @@ import { apiGet } from '../api';
 import { HardDrive, Check, Save, RefreshCw, Play, Pause,
          Film, AlertTriangle, Info, Cpu, Zap, Folder } from 'lucide-react';
 
-const API = 'http://localhost:8000';
+// Relative base — works from any PC on the LAN
+const API = '';
 const put = (p, b) => fetch(`${API}${p}`, {
   method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(b)
 }).then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); });
@@ -383,7 +384,7 @@ export default function Recording() {
                       Cam {f.camera_id??'?'} · {f.size_mb} MB · {new Date(f.created*1000).toLocaleString('es-MX')}
                     </div>
                   </div>
-                  <a href={`http://localhost:8000${f.url}`} target="_blank" rel="noreferrer">
+                  <a href={f.url} target="_blank" rel="noreferrer">
                     <button className="btn btn-ghost btn-sm"><Play size={12}/> Ver</button>
                   </a>
                 </div>
