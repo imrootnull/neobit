@@ -359,13 +359,15 @@ function ParamsPanel({ analytic, catColor, saving, onSave }) {
         {/* EPP-specific */}
         {'required_ppe' in local && (() => {
           const EPP_ITEMS = [
-            { key: 'helmet',   label: 'Casco',       zone: 'cabeza',  icon: '🪖' },
-            { key: 'vest',     label: 'Chaleco',      zone: 'torso',   icon: '🦺' },
-            { key: 'gloves',   label: 'Guantes',      zone: 'manos',   icon: '🧤' },
-            { key: 'goggles',  label: 'Lentes',       zone: 'cara',    icon: '🥽' },
-            { key: 'mask',     label: 'Mascarilla',   zone: 'cara',    icon: '😷' },
-            { key: 'shoes',    label: 'Botas',        zone: 'pies',    icon: '👢' },
-            { key: 'overalls', label: 'Overol',       zone: 'cuerpo',  icon: '👔' },
+            { key: 'helmet',        label: 'Casco',             zone: 'cabeza',  icon: '🪖' },
+            { key: 'vest',          label: 'Chaleco',            zone: 'torso',   icon: '🦺' },
+            { key: 'gloves',        label: 'Guantes',            zone: 'manos',   icon: '🧤' },
+            { key: 'goggles',       label: 'Lentes',             zone: 'cara',    icon: '🥽' },
+            { key: 'mask',          label: 'Mascarilla',         zone: 'cara',    icon: '😷' },
+            { key: 'shoes',         label: 'Botas',              zone: 'pies',    icon: '👢' },
+            { key: 'overalls',      label: 'Overol',             zone: 'cuerpo',  icon: '👔' },
+            { key: 'harness',       label: 'Arnés',              zone: 'cuerpo',  icon: '🪢' },
+            { key: 'ear_protector', label: 'Protector auditivo', zone: 'orejas',  icon: '🎧' },
           ];
           return (
             <div className="form-group" style={{ flex: '1 1 100%', marginBottom: 0 }}>

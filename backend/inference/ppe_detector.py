@@ -62,6 +62,17 @@ PPE_PRESENT: dict[str, str] = {
     "overalls":        "overalls",
     "coverall":        "overalls",
     "coveralls":       "overalls",
+    "ppe-suit":        "overalls",
+    "ppe_suit":        "overalls",
+    # Safety harness
+    "harness":         "harness",
+    "safety-harness":  "harness",
+    "safety_harness":  "harness",
+    # Ear protection
+    "ear-protector":   "ear_protector",
+    "ear_protector":   "ear_protector",
+    "earmuff":         "ear_protector",
+    "earplugs":        "ear_protector",
 }
 
 PPE_ABSENT: dict[str, str] = {
@@ -85,39 +96,49 @@ PPE_ABSENT: dict[str, str] = {
     "no-shoes":         "shoes",
     "no_overalls":      "overalls",
     "no-overalls":      "overalls",
+    "no_harness":       "harness",
+    "no-harness":       "harness",
+    "no_ear_protector": "ear_protector",
+    "no-ear-protector": "ear_protector",
 }
 
 # Human-readable Spanish labels for each EPP key
 EPP_LABELS_ES: dict[str, str] = {
-    "helmet":   "Casco",
-    "vest":     "Chaleco",
-    "gloves":   "Guantes",
-    "goggles":  "Lentes",
-    "mask":     "Mascarilla",
-    "shoes":    "Botas",
-    "overalls": "Overol",
+    "helmet":        "Casco",
+    "vest":          "Chaleco",
+    "gloves":        "Guantes",
+    "goggles":       "Lentes",
+    "mask":          "Mascarilla",
+    "shoes":         "Botas",
+    "overalls":      "Overol",
+    "harness":       "Arnés",
+    "ear_protector": "Protector auditivo",
 }
 
 # Body zone: (top_frac, bottom_frac) of person bounding box height where item MUST appear
 # 0.0 = top of person bbox, 1.0 = bottom
 BODY_ZONES: dict[str, tuple[float, float]] = {
-    "helmet":   (0.00, 0.25),   # head: top 25%
-    "goggles":  (0.02, 0.28),   # face/eyes: top 28%
-    "mask":     (0.05, 0.30),   # lower face: 5–30%
-    "vest":     (0.15, 0.75),   # torso: 15–75%
-    "gloves":   (0.40, 1.00),   # hands/forearms: lower 60%
-    "shoes":    (0.70, 1.00),   # feet: bottom 30%
-    "overalls": (0.05, 1.00),   # full body: 5–100%
+    "helmet":        (0.00, 0.25),   # head: top 25%
+    "goggles":       (0.02, 0.28),   # face/eyes: top 28%
+    "mask":          (0.05, 0.30),   # lower face: 5–30%
+    "ear_protector": (0.00, 0.25),   # ears: head zone
+    "vest":          (0.15, 0.75),   # torso: 15–75%
+    "harness":       (0.05, 0.85),   # full torso+shoulders: 5–85%
+    "gloves":        (0.40, 1.00),   # hands/forearms: lower 60%
+    "shoes":         (0.70, 1.00),   # feet: bottom 30%
+    "overalls":      (0.05, 1.00),   # full body: 5–100%
 }
 
 ZONE_NAMES_ES: dict[str, str] = {
-    "helmet":   "cabeza",
-    "goggles":  "cara",
-    "mask":     "cara",
-    "vest":     "torso",
-    "gloves":   "manos",
-    "shoes":    "pies",
-    "overalls": "cuerpo",
+    "helmet":        "cabeza",
+    "goggles":       "cara",
+    "mask":          "cara",
+    "ear_protector": "orejas",
+    "vest":          "torso",
+    "harness":       "cuerpo",
+    "gloves":        "manos",
+    "shoes":         "pies",
+    "overalls":      "cuerpo",
 }
 
 # Colors (BGR)
