@@ -6,7 +6,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { apiGet, apiPost } from '../api';
 import {
   User, Check, X, Trash2, RefreshCw, Filter,
-  ChevronLeft, ChevronRight, Tag, Camera
+  ChevronLeft, ChevronRight, Tag, Camera, Brain
 } from 'lucide-react';
 
 const STATUS_TABS = [
@@ -80,6 +80,18 @@ export default function FaceLibrary({ onClose }: Props) {
     } finally { setSaving(false); }
   };
 
+  const [galleryMsg, setGalleryMsg] = useState('');
+  const refreshGallery = async () => {
+    try {
+      await apiPost('/api/faces/refresh-gallery', {});
+      setGalleryMsg('Gallery actualizado');
+      setTimeout(() => setGalleryMsg(''), 3000);
+    } catch {
+      setGalleryMsg('Error al actualizar');
+      setTimeout(() => setGalleryMsg(''), 3000);
+    }
+  };
+
   const deleteFace = async (id: number) => {
     await apiPost(`/api/faces/${id}`, {}, 'DELETE');
     setFaces(prev => prev.filter(f => f.id !== id));
@@ -118,6 +130,17 @@ export default function FaceLibrary({ onClose }: Props) {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {galleryMsg && (
+              <span style={{ fontSize: 11, color: '#22c55e', fontWeight: 600 }}>{galleryMsg}</span>
+            )}
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={refreshGallery}
+              title="Reconstruir gallery de reconocimiento facial"
+              style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11 }}
+            >
+              <Brain size={13} /> Actualizar Gallery
+            </button>
             <button className="btn btn-ghost btn-icon" onClick={fetchFaces} title="Actualizar">
               <RefreshCw size={14} />
             </button>

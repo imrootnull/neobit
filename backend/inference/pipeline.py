@@ -24,9 +24,10 @@ from loguru import logger
 from backend.core.event_bus import EventBus, AnalyticEvent
 from backend.core.stream_manager import stream_manager
 from backend.analytics.registry import ANALYTICS_BY_KEY
-from backend.inference.detector     import YOLODetector, YOLO_ANALYTICS
-from backend.inference.fall_detector import FallDetector
-from backend.inference.ppe_detector  import PPEDetector
+from backend.inference.detector        import YOLODetector, YOLO_ANALYTICS
+from backend.inference.fall_detector   import FallDetector
+from backend.inference.ppe_detector    import PPEDetector
+from backend.inference.face_recognizer import FaceRecognizer
 from backend.core.recording_manager import purge_oldest_snapshots
 
 
@@ -129,10 +130,10 @@ class AnalyticsWorker:
     thread:           Optional[threading.Thread] = field(default=None, repr=False)
     running:          bool = False
     _last_event:      dict = field(default_factory=dict, repr=False)
-    _detector:        Optional[YOLODetector] = field(default=None, repr=False)
-    _fall_detector:   Optional[FallDetector] = field(default=None, repr=False)
-    _ppe_detector:    Optional[PPEDetector]  = field(default=None, repr=False)
-    _face_net:        object = field(default=None, repr=False)   # cv2.dnn face net
+    _detector:        Optional[YOLODetector]  = field(default=None, repr=False)
+    _fall_detector:   Optional[FallDetector]  = field(default=None, repr=False)
+    _ppe_detector:    Optional[PPEDetector]   = field(default=None, repr=False)
+    _face_recognizer: Optional[FaceRecognizer] = field(default=None, repr=False)
     # PPE async: run inference in background thread, cache overlay annotations
     _ppe_frame_skip:  int    = field(default=5,    repr=False)   # run PPE every N frames
     _ppe_frame_ctr:   int    = field(default=0,    repr=False)
@@ -402,6 +403,11 @@ class AnalyticsWorker:
             rel_y = (ecy - by1) / ph
             zone  = BODY_ZONES.get(ppe_key, (0.0, 1.0))
 
+            logger.debug(
+                f"PPE zone | {ppe_key}: rel_y={rel_y:.2f} zone={zone} "
+                f"person_h={ph}px ({'IN' if zone[0] <= rel_y <= zone[1] else 'OUT'})"
+            )
+
             if zone[0] <= rel_y <= zone[1]:
                 if status[ppe_key] != "missing":
                     status[ppe_key] = "correct"
@@ -482,114 +488,64 @@ class AnalyticsWorker:
 
     def _run_face_detection(self, frame, config: dict, person_detections: list | None = None):
         """
-        Detect faces using OpenCV DNN (ResNet-SSD) face detector.
-        Far more accurate than Haar cascade: handles varying angles, lighting,
-        and strongly rejects non-face patterns (objects, body parts, clutter).
+        Detect and identify faces using InsightFace buffalo_s.
 
-        Model: res10_300x300_ssd_iter_140000.caffemodel (~10 MB, local)
-        Cross-validates with YOLO person bboxes to further eliminate FPs.
+        - RetinaFace detects faces at 320x320 input (~30ms CPU)
+        - ArcFace R50 generates 512-d embeddings for identity matching
+        - Cross-validates against YOLO person bboxes (top 45% = head zone)
+        - Saves captures to FaceLibrary at a rate-limited cadence
+        - Emits face_detection events; recognized faces include identity info
         """
-        import cv2 as _cv2
-        import os
-        if not self._rate_limit_ok("face_detection", config):
-            return
-
         if person_detections is not None and len(person_detections) == 0:
             return
 
-        # Lazy init of DNN face detector
-        if self._face_net is None:
-            models_dir = os.path.join(os.path.dirname(__file__), "..", "..", "models")
-            proto  = os.path.abspath(os.path.join(models_dir, "deploy.prototxt"))
-            model  = os.path.abspath(os.path.join(models_dir, "res10_300x300_ssd_iter_140000.caffemodel"))
-            if os.path.exists(proto) and os.path.exists(model):
-                self._face_net = _cv2.dnn.readNetFromCaffe(proto, model)
-                logger.info("DNN face detector loaded")
-            else:
-                logger.warning("DNN face model files not found — face detection disabled")
-                self._face_net = False   # sentinel: don't retry
-                return
+        # Lazy-init InsightFace recognizer (downloads model once ~50MB)
+        if self._face_recognizer is None:
+            self._face_recognizer = FaceRecognizer()
 
-        if self._face_net is False:
-            return
-
-        h_frame, w_frame = frame.shape[:2]
-        min_conf_dnn = 0.65   # DNN internal confidence threshold
-        min_conf_evt = config.get("confidence", 0.70)
-
-        # Prepare input blob
-        blob = _cv2.dnn.blobFromImage(
-            _cv2.resize(frame, (300, 300)), 1.0,
-            (300, 300), (104.0, 177.0, 123.0),
+        results = self._face_recognizer.process(
+            frame,
+            camera_id         = self._camera_id,
+            config            = config,
+            person_detections = person_detections,
+            draw              = True,
         )
-        self._face_net.setInput(blob)
-        detections = self._face_net.forward()
 
-        faces = []  # list of (x1, y1, x2, y2, conf)
-        for i in range(detections.shape[2]):
-            dnn_conf = float(detections[0, 0, i, 2])
-            if dnn_conf < min_conf_dnn:
-                continue
-            box = detections[0, 0, i, 3:7] * [w_frame, h_frame, w_frame, h_frame]
-            x1, y1, x2, y2 = box.astype(int)
-            # Clamp to frame
-            x1, y1 = max(x1, 0), max(y1, 0)
-            x2, y2 = min(x2, w_frame), min(y2, h_frame)
-            fw, fh = x2 - x1, y2 - y1
-            if fw < 40 or fh < 40:    # ignore tiny detections
-                continue
-            faces.append((x1, y1, x2, y2, dnn_conf))
-
-        if not faces:
+        if not results:
             return
 
-        # Cross-validate: face center must be in head region of a YOLO person bbox
-        if person_detections:
-            confirmed = []
-            for (fx1, fy1, fx2, fy2, fc) in faces:
-                fcx = (fx1 + fx2) / 2
-                fcy = (fy1 + fy2) / 2
-                for p in person_detections:
-                    px1, py1, px2, py2 = p["bbox"]
-                    ph = py2 - py1
-                    head_y2 = py1 + int(ph * 0.40)   # top 40% = head region
-                    if px1 <= fcx <= px2 and py1 <= fcy <= head_y2:
-                        confirmed.append((fx1, fy1, fx2, fy2, fc))
-                        break
-            faces = confirmed
-
-        if not faces:
-            return
-
-        # Best confidence from DNN detections
-        best_conf = max(fc for *_, fc in faces)
-        if best_conf < min_conf_evt:
-            return
-
-        # Draw confirmed faces
-        for (x1, y1, x2, y2, fc) in faces:
-            _cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 220, 180), 2)
-            label = f"Rostro {fc:.0%}"
-            (tw, th), _ = _cv2.getTextSize(label, _cv2.FONT_HERSHEY_DUPLEX, 0.42, 1)
-            _cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 6, y1), (0, 220, 180), -1)
-            _cv2.putText(frame, label, (x1 + 3, y1 - 4),
-                         _cv2.FONT_HERSHEY_DUPLEX, 0.42, (10, 10, 10), 1, _cv2.LINE_AA)
-
-        # Save best-quality face to library (non-blocking, rate-limited per camera)
+        # Save best-quality face to library (rate-limited per camera via FaceLibrary)
         try:
             from backend.core.face_library import FaceLibrary
-            best = max(faces, key=lambda f: f[4])   # highest confidence face
+            best = max(results, key=lambda r: r["confidence"])
+            x1, y1, x2, y2 = best["bbox"]
             FaceLibrary.get().capture(
                 frame,
-                bbox=(best[0], best[1], best[2], best[3]),
-                camera_id=self._camera_id,
-                confidence=best[4],
+                bbox      = (x1, y1, x2, y2),
+                camera_id = self._camera_id,
+                confidence= best["confidence"],
             )
         except Exception as _e:
             logger.trace(f"Face library capture error: {_e}")
 
-        desc = f"{len(faces)} rostro(s) detectado(s)" if len(faces) > 1 else "Rostro detectado"
+        # Rate-limit events
+        if not self._rate_limit_ok("face_detection", config):
+            return
+
+        # Build event description
+        identified = [r for r in results if r["identity"]]
+        if identified:
+            names     = ", ".join(r["identity"] for r in identified)
+            desc      = f"Persona identificada: {names}"
+            best_conf = max(r["sim"] for r in identified)
+        else:
+            n         = len(results)
+            desc      = f"{n} rostro(s) detectado(s) — sin identificar"
+            best_conf = max(r["confidence"] for r in results)
+
         self._emit_event("face_detection", round(best_conf, 2), desc, config)
+
+
 
 
     def _evaluate_detections(self, detections: list, enabled: dict[str, dict]):
@@ -900,6 +856,17 @@ class InferencePipeline:
             for cid, w in self._workers.items()
         ]
 
+    def refresh_face_gallery(self):
+        """Rebuild InsightFace embedding gallery in all running workers."""
+        refreshed = 0
+        for worker in self._workers.values():
+            rec = getattr(worker, "_face_recognizer", None)
+            if rec is not None:
+                rec.refresh_gallery()
+                refreshed += 1
+        logger.info(f"Face gallery refresh requested — {refreshed} worker(s) updated")
+        return refreshed
+
     def stop_all(self):
         for worker in self._workers.values():
             worker.stop()
@@ -908,3 +875,6 @@ class InferencePipeline:
 
 # Global singleton
 inference_pipeline = InferencePipeline()
+
+# Expose workers dict so the faces API can access recognizer instances
+_worker_registry = inference_pipeline._workers

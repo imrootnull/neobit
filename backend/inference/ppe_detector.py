@@ -35,33 +35,50 @@ HF_SECONDARY_FILE = "best.pt"
 # Map model class names (lowercase, normalized) → canonical EPP key
 # The medium model may have slightly different class names — handle both
 PPE_PRESENT: dict[str, str] = {
-    # Helmets / hard hats
+    # Helmets / hard hats — all variants a model might output
     "helmet":          "helmet",
     "hardhat":         "helmet",
     "hard hat":        "helmet",
     "hard_hat":        "helmet",
+    "hardhats":        "helmet",
+    "safety helmet":   "helmet",
+    "safety_helmet":   "helmet",
+    "construction helmet": "helmet",
+    "bump cap":        "helmet",
+    "bump_cap":        "helmet",
     # Safety vest
     "vest":            "vest",
     "safety vest":     "vest",
     "safety_vest":     "vest",
     "jacket":          "vest",
+    "hi-vis":          "vest",
+    "hivis":           "vest",
+    "high-vis":        "vest",
+    "reflective vest": "vest",
     # Gloves
     "glove":           "gloves",
     "gloves":          "gloves",
+    "safety gloves":   "gloves",
     # Goggles / safety glasses
     "goggles":         "goggles",
     "glasses":         "goggles",
     "safety glasses":  "goggles",
     "safety_glasses":  "goggles",
+    "eye protection":  "goggles",
     # Mask
     "mask":            "mask",
     "face mask":       "mask",
     "face_mask":       "mask",
-    # Footwear
+    "respirator":      "mask",
+    # Footwear — primary model uses 'safety_shoe' (with underscore)
     "shoes":           "shoes",
     "boots":           "shoes",
     "safety shoes":    "shoes",
     "safety_shoes":    "shoes",
+    "safety shoe":     "shoes",
+    "safety_shoe":     "shoes",   # ← Tanishjain9 primary model class
+    "boot":            "shoes",
+    "steel toe":       "shoes",
     # Overalls
     "overalls":        "overalls",
     "coverall":        "overalls",
@@ -121,16 +138,23 @@ EPP_LABELS_ES: dict[str, str] = {
 
 # Body zone: (top_frac, bottom_frac) of person bounding box height where item MUST appear
 # 0.0 = top of person bbox, 1.0 = bottom
+#
+# IMPORTANT: YOLOv8n frequently detects partial persons (waist-up) in
+# surveillance cameras at angles. Zones are relaxed to accommodate:
+#   - Helmet at 0-45%: if person bbox starts at shoulder, helmet center
+#     falls at ~35-40% of bbox height.
+#   - Shoes at 55-100%: feet may not be fully visible; 55% gives leeway.
+#   - Vest at 10-90%: vest can span almost the full visible torso.
 BODY_ZONES: dict[str, tuple[float, float]] = {
-    "helmet":        (0.00, 0.25),   # head: top 25%
-    "goggles":       (0.02, 0.28),   # face/eyes: top 28%
-    "mask":          (0.05, 0.30),   # lower face: 5–30%
-    "ear_protector": (0.00, 0.25),   # ears: head zone
-    "vest":          (0.15, 0.75),   # torso: 15–75%
-    "harness":       (0.05, 0.85),   # full torso+shoulders: 5–85%
-    "gloves":        (0.40, 1.00),   # hands/forearms: lower 60%
-    "shoes":         (0.70, 1.00),   # feet: bottom 30%
-    "overalls":      (0.05, 1.00),   # full body: 5–100%
+    "helmet":        (0.00, 0.45),   # head: top 45% (relaxed for partial persons)
+    "goggles":       (0.00, 0.50),   # face/eyes: top 50%
+    "mask":          (0.00, 0.50),   # lower face: 0–50%
+    "ear_protector": (0.00, 0.45),   # ears: head zone
+    "vest":          (0.05, 0.90),   # torso: 5–90%
+    "harness":       (0.00, 1.00),   # full torso+shoulders: entire bbox
+    "gloves":        (0.25, 1.00),   # hands/forearms: lower 75%
+    "shoes":         (0.55, 1.00),   # feet: bottom 45% (partial visibility)
+    "overalls":      (0.00, 1.00),   # full body: entire bbox
 }
 
 ZONE_NAMES_ES: dict[str, str] = {

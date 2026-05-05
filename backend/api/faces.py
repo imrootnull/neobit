@@ -6,9 +6,10 @@ GET    /api/faces/stats      — counts per status
 GET    /api/faces/{id}/image — serve face image (JPEG)
 PATCH  /api/faces/{id}       — update status and/or label
 DELETE /api/faces/{id}       — delete record + image file
+POST   /api/faces/refresh-gallery — rebuild InsightFace embedding gallery
 """
 import os
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from backend.core.face_library import FaceLibrary
@@ -68,3 +69,24 @@ async def delete_face(face_id: int):
     if not ok:
         raise HTTPException(404, "Face not found")
     return {"ok": True}
+
+
+@router.post("/refresh-gallery")
+async def refresh_gallery(background_tasks: BackgroundTasks):
+    """
+    Rebuild the InsightFace embedding gallery from all validated+labeled faces.
+    Runs in background (1-5s depending on gallery size).
+    Call this after validating/labeling faces in the UI.
+    """
+    def _do_refresh():
+        try:
+            from backend.inference.pipeline import inference_pipeline
+            inference_pipeline.refresh_face_gallery()
+        except Exception as e:
+            import logging
+            logging.warning(f"Gallery refresh error: {e}")
+
+    background_tasks.add_task(_do_refresh)
+    return {"ok": True, "message": "Gallery refresh scheduled"}
+
+
