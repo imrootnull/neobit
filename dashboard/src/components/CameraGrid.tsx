@@ -1,7 +1,58 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getMjpegUrl } from '../api';
-import { WifiOff, AlertTriangle, X, Maximize2, Minimize2, Signal, Radio } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { getSnapshotUrl } from '../api';
+import { WifiOff, AlertTriangle, X, Maximize2 } from 'lucide-react';
 import { ANALYTIC_ICONS } from './Icons';
+
+// ─── Snapshot poller — replaces MJPEG persistent connection ──────────────────
+// Polls /snapshot every INTERVAL ms via normal HTTP GET (no persistent stream).
+// Visually identical to MJPEG but doesn't block uvicorn's event loop.
+
+const POLL_INTERVAL = 150; // ms — ~6-7 fps display, ideal for CPU gateway
+
+function SnapshotImg({
+  cameraId,
+  style,
+  onError,
+}: {
+  cameraId: number;
+  style?: React.CSSProperties;
+  onError?: () => void;
+}) {
+  const [src, setSrc] = useState('');
+  const timerRef = useRef<number | null>(null);
+  const seqRef   = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+
+    const poll = () => {
+      if (!active) return;
+      const seq = ++seqRef.current;
+      const url = `${getSnapshotUrl(cameraId)}?t=${Date.now()}`;
+      const img = new Image();
+      img.onload = () => {
+        if (active && seq === seqRef.current) setSrc(url);
+        timerRef.current = window.setTimeout(poll, POLL_INTERVAL);
+      };
+      img.onerror = () => {
+        if (active) {
+          onError?.();
+          timerRef.current = window.setTimeout(poll, POLL_INTERVAL * 3);
+        }
+      };
+      img.src = url;
+    };
+
+    poll();
+    return () => {
+      active = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [cameraId]);
+
+  if (!src) return null;
+  return <img src={src} alt={`cam-${cameraId}`} style={style} />;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -213,9 +264,8 @@ export default function CameraGrid({ cameras, streams, lastEvent, onSelect }: Ca
               boxShadow: '0 32px 64px rgba(0,0,0,0.7)',
             }}>
               {expandedStream?.connected ? (
-                <img
-                  src={getMjpegUrl(expanded.id)}
-                  alt={expanded.name}
+                <SnapshotImg
+                  cameraId={expanded.id}
                   style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
                 />
               ) : (
@@ -256,9 +306,8 @@ export default function CameraGrid({ cameras, streams, lastEvent, onSelect }: Ca
                       }}
                     >
                       {isOk ? (
-                        <img
-                          src={getMjpegUrl(cam.id)}
-                          alt={cam.name}
+                        <SnapshotImg
+                          cameraId={cam.id}
                           style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                         />
                       ) : (
@@ -321,9 +370,9 @@ function CameraCell({ camera, connected, fps, alert, selected, onClick }: Camera
       }
     >
       {connected && !imgError ? (
-        <img
-          src={getMjpegUrl(camera.id)}
-          alt={camera.name}
+        <SnapshotImg
+          cameraId={camera.id}
+          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
           onError={() => setImgError(true)}
         />
       ) : (
