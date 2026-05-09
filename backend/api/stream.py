@@ -27,18 +27,28 @@ _POLL_MS      = 0.033
 _KEEPALIVE_S  = 0.5
 
 # Cache of SharedFrame slots keyed by camera_id.
-# Populated lazily on first snapshot request; worker.py creates them.
+# Populated lazily; retries every 5s if worker.py hasn't created the slot yet.
 _shm_cache: dict[int, object] = {}
+_shm_last_try: dict[int, float] = {}
 
 def _get_shm(camera_id: int):
-    """Return cached SharedFrame for camera, or None if not available."""
-    if camera_id in _shm_cache:
-        return _shm_cache[camera_id]
+    """Return cached SharedFrame for camera, or None if not available.
+    Retries opening every 5s so uvicorn picks up overlays once worker starts.
+    """
+    import time as _time
+    slot = _shm_cache.get(camera_id, "unset")
+    if slot != "unset" and slot is not None:
+        return slot
+    # Retry if None or never tried, but throttle to every 5s
+    last = _shm_last_try.get(camera_id, 0)
+    if _time.monotonic() - last < 5.0 and slot is None:
+        return None
+    _shm_last_try[camera_id] = _time.monotonic()
     try:
         from backend.core.frame_bridge import SharedFrame
-        slot = SharedFrame(f"nb_ann_{camera_id}", create=False)
-        _shm_cache[camera_id] = slot
-        return slot
+        new_slot = SharedFrame(f"nb_ann_{camera_id}", create=False)
+        _shm_cache[camera_id] = new_slot
+        return new_slot
     except Exception:
         _shm_cache[camera_id] = None
         return None

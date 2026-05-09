@@ -8,12 +8,15 @@ mostrando los overlays de detección en tiempo real.
 """
 import os, asyncio, time
 
-os.environ["HSA_OVERRIDE_GFX_VERSION"] = "12.0.0"   # RDNA 4 gfx1200
+os.environ["HSA_OVERRIDE_GFX_VERSION"] = "12.0.0"  # RDNA 4 gfx1200
+os.environ["ROCR_VISIBLE_DEVICES"]     = "0"        # ROCm: use GPU 0
 os.environ["OMP_NUM_THREADS"]          = "4"
 os.environ["MKL_NUM_THREADS"]          = "4"
 os.environ["OPENBLAS_NUM_THREADS"]     = "4"
 os.environ["NUMEXPR_NUM_THREADS"]      = "4"
 os.environ["TOKENIZERS_PARALLELISM"]   = "false"
+# CUDA_VISIBLE_DEVICES was set by CUDA toolkit install and confuses ROCm torch
+os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
 import torch, cv2
 torch.set_num_threads(4)
