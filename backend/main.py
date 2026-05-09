@@ -79,14 +79,17 @@ async def lifespan(app: FastAPI):
             from backend.storage.database import AsyncSessionLocal
             loop = asyncio.get_event_loop()
 
-            hw = get_system_info()
-            logger.info(f"🖥️  {hw.get('processor','?')} | RAM {hw.get('ram_total_gb','?')}GB")
-
-            # Skip inference if running in HTTP-only mode (worker.py handles it)
             no_inference = os.environ.get("NEOBIT_NO_INFERENCE", "0") == "1"
 
             if not no_inference:
+                # get_system_info calls torch.cuda.is_available() — skip in HTTP-only
+                # mode to avoid ROCm segfault (ROCm init is not safe in uvicorn process)
+                hw = get_system_info()
+                logger.info(f"🖥️  {hw.get('processor','?')} | RAM {hw.get('ram_total_gb','?')}GB")
                 inference_pipeline.init(event_bus, loop)
+            else:
+                import platform
+                logger.info(f"🖥️  {platform.processor()} | HTTP-only mode")
 
             async with AsyncSessionLocal() as db:
                 result = await db.execute(select(Camera).where(Camera.enabled == True))
@@ -95,7 +98,7 @@ async def lifespan(app: FastAPI):
                     stream_manager.add_camera(
                         cam.id, cam.rtsp_url, cam.name, cam.frame_skip,
                         max_width=cam.resolution_w or 0,
-                        target_fps=cam.fps or 0.0,
+                        target_fps=cam.fps or 10.0,
                     )
                     if not no_inference:
                         cfg = cam.analytics_config or {}
