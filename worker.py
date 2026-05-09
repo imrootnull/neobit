@@ -111,9 +111,25 @@ async def main():
     logger.info(f"✅ Analytics worker running — {len(cameras)} cameras")
 
 
-    # CLIP indexer (uvicorn skips it in HTTP-only mode)
-    from backend.semantic.search_engine import clip_indexer
-    asyncio.create_task(clip_indexer.start())
+    # CLIP indexer — load model in thread pool so it doesn't block the event loop.
+    # CLIP transformer loading takes 5-10s synchronously and would freeze YOLO.
+    async def _start_clip_nonblocking():
+        await asyncio.sleep(60)   # let YOLO stabilize first
+        from backend.semantic.search_engine import clip_indexer
+        loop = asyncio.get_event_loop()
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="clip-load") as pool:
+            try:
+                # Load model weights off the event loop
+                await loop.run_in_executor(pool, clip_indexer._load)
+                logger.info("✅ CLIP model loaded (background)")
+            except Exception as e:
+                logger.warning(f"CLIP load failed: {e}")
+        # Start async indexing loop now that model is ready
+        asyncio.create_task(clip_indexer.start())
+
+    asyncio.create_task(_start_clip_nonblocking())
+
 
     # Keep alive
     while True:
