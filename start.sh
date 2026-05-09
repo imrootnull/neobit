@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────
 #  NeoBit Gateway — Network Start Script
-#  Levanta el backend sirviendo el dashboard compilado.
-#  Accesible desde cualquier PC en la misma red.
+#  Two-process architecture:
+#    PID A: uvicorn HTTP server  (no inference → no GIL contention)
+#    PID B: analytics worker     (YOLO/InsightFace — own GIL)
 # ─────────────────────────────────────────────────────────────────
 
 set -e
@@ -27,5 +28,22 @@ echo "     http://localhost:${PORT}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# ── 3. Levantar backend ───────────────────────────────────────────
-python3 run.py
+# ── 3. Levantar HTTP server (sin inferencia) ──────────────────────
+export NEOBIT_NO_INFERENCE=1
+python3 run.py &
+HTTP_PID=$!
+echo "  [PID ${HTTP_PID}] HTTP server"
+
+# ── 4. Levantar analytics worker (inferencia separada) ────────────
+sleep 2   # espera que uvicorn levante primero
+python3 worker.py &
+WORKER_PID=$!
+echo "  [PID ${WORKER_PID}] Analytics worker"
+
+echo ""
+echo "  Ctrl+C para detener ambos procesos"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# ── 5. Esperar y limpiar ──────────────────────────────────────────
+trap "echo ''; echo 'Deteniendo...'; kill $HTTP_PID $WORKER_PID 2>/dev/null; exit 0" INT TERM
+wait $HTTP_PID

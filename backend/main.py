@@ -73,17 +73,20 @@ async def lifespan(app: FastAPI):
     # Camera/YOLO/CLIP init happens in the background so the dashboard
     # loads instantly — cameras appear within a few seconds.
     async def _delayed_startup():
-        await asyncio.sleep(1)   # let uvicorn fully bind and serve first
+        await asyncio.sleep(1)
         try:
             from sqlalchemy import select
             from backend.storage.database import AsyncSessionLocal
             loop = asyncio.get_event_loop()
 
-            # Hardware info (may do I/O)
             hw = get_system_info()
             logger.info(f"🖥️  {hw.get('processor','?')} | RAM {hw.get('ram_total_gb','?')}GB")
 
-            inference_pipeline.init(event_bus, loop)
+            # Skip inference if running in HTTP-only mode (worker.py handles it)
+            no_inference = os.environ.get("NEOBIT_NO_INFERENCE", "0") == "1"
+
+            if not no_inference:
+                inference_pipeline.init(event_bus, loop)
 
             async with AsyncSessionLocal() as db:
                 result = await db.execute(select(Camera).where(Camera.enabled == True))
@@ -94,16 +97,19 @@ async def lifespan(app: FastAPI):
                         max_width=cam.resolution_w or 0,
                         target_fps=cam.fps or 0.0,
                     )
-                    cfg = cam.analytics_config or {}
-                    if cfg:
-                        inference_pipeline.add_camera(cam.id, cfg)
+                    if not no_inference:
+                        cfg = cam.analytics_config or {}
+                        if cfg:
+                            inference_pipeline.add_camera(cam.id, cfg)
                     recording_manager.add_camera(
                         cam.id,
                         lambda cid=cam.id: stream_manager.get_annotated_frame(cid)
                     )
-                logger.info(f"✅ Restored {len(cameras)} cameras")
+                logger.info(f"✅ Restored {len(cameras)} cameras" +
+                            (" (HTTP-only mode)" if no_inference else ""))
         except Exception as e:
             logger.error(f"Startup error: {e}")
+
 
     startup_task = asyncio.create_task(_delayed_startup())
 
