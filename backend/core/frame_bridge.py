@@ -26,6 +26,13 @@ class SharedFrame:
             self._shm.buf[:HEADER_SIZE] = b"\x00" * HEADER_SIZE
         else:
             self._shm = SharedMemory(name=name, create=False)
+            # Prevent Python's resource_tracker from unlinking memory owned
+            # by the worker process — causes SIGSEGV on next access
+            try:
+                from multiprocessing import resource_tracker
+                resource_tracker.unregister(f"/{name}", "shared_memory")
+            except Exception:
+                pass
         self._buf = self._shm.buf
         self._name = name
 
@@ -48,12 +55,18 @@ class SharedFrame:
         return fid + 1
 
     def read(self) -> tuple:
-        w, h, c, fid = struct.unpack_from(HEADER_FMT, self._buf, 0)
-        if fid == 0 or w == 0:
+        try:
+            w, h, c, fid = struct.unpack_from(HEADER_FMT, self._buf, 0)
+            if fid == 0 or w == 0 or h == 0 or c == 0:
+                return None, 0
+            expected = w * h * c
+            if expected > MAX_DATA or expected <= 0:
+                return None, 0
+            arr = np.frombuffer(self._buf, dtype=np.uint8,
+                                count=expected, offset=HEADER_SIZE).copy()
+            return arr.reshape(h, w, c), fid
+        except Exception:
             return None, 0
-        arr = np.frombuffer(self._buf, dtype=np.uint8,
-                            count=w * h * c, offset=HEADER_SIZE).copy()
-        return arr.reshape(h, w, c), fid
 
     def frame_id(self) -> int:
         return struct.unpack_from(HEADER_FMT, self._buf, 0)[3]
