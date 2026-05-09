@@ -131,35 +131,36 @@ async def stream_mjpeg(camera_id: int, quality: int = _JPEG_QUALITY):
 @router.get("/{camera_id}/snapshot")
 async def get_snapshot(camera_id: int, quality: int = 85):
     """
-    Single JPEG snapshot — reads annotated frame from shared memory
-    (written by worker.py with YOLO overlays). Falls back to local
-    stream_manager frame if shared memory not yet populated.
+    JPEG snapshot — reads annotated frame (with YOLO overlays) written by
+    worker.py to /dev/shm as a JPEG. Falls back to raw frame if not ready.
     """
-    frame = None
+    import os
 
-    # Try shared memory first (annotated frame with YOLO overlays from worker)
-    frame = None
-    slot = _get_shm(camera_id)
-    if slot is not None:
-        frame, fid = slot.read()
-        if fid == 0:
-            frame = None
+    shm_path = f"/dev/shm/neobit_ann_{camera_id}.jpg"
+    jpeg: bytes | None = None
 
-    # Fallback: raw frame from local stream_manager
-    if frame is None:
+    # Try worker's annotated JPEG first (has overlays)
+    if os.path.exists(shm_path):
+        try:
+            with open(shm_path, "rb") as f:
+                jpeg = f.read()
+        except Exception:
+            jpeg = None
+
+    # Fallback: encode raw frame from local stream_manager
+    if not jpeg:
         frame = stream_manager.get_annotated_frame(camera_id)
+        if frame is None:
+            raise HTTPException(status_code=503, detail=f"No frame for camera {camera_id}")
+        loop = asyncio.get_event_loop()
+        try:
+            jpeg = await loop.run_in_executor(_encode_pool, _encode_sync, frame, quality)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
+    return Response(content=jpeg, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-cache"})
 
-    if frame is None:
-        raise HTTPException(status_code=503, detail=f"No frame for camera {camera_id}")
-
-    loop = asyncio.get_event_loop()
-    try:
-        jpeg = await loop.run_in_executor(_encode_pool, _encode_sync, frame, quality)
-        return Response(content=jpeg, media_type="image/jpeg",
-                        headers={"Cache-Control": "no-cache"})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 

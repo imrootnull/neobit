@@ -71,44 +71,29 @@ async def main():
         result = await db.execute(select(Camera).where(Camera.enabled == True))
         cameras = result.scalars().all()
 
-    # Shared memory slots — one per camera for annotated frames
-    # uvicorn reads from these to serve /snapshot with overlays
-    shm_slots: dict[int, SharedFrame] = {}
-
-    for cam in cameras:
-        stream_manager.add_camera(
-            cam.id, cam.rtsp_url, cam.name, cam.frame_skip,
-            max_width=cam.resolution_w or 0,
-            target_fps=cam.fps or 0.0,
-        )
-        cfg = cam.analytics_config or {}
-        if cfg:
-            inference_pipeline.add_camera(cam.id, cfg)
-        recording_manager.add_camera(
-            cam.id, lambda cid=cam.id: stream_manager.get_annotated_frame(cid)
-        )
-        # Create shared memory slot for this camera
-        try:
-            shm_slots[cam.id] = SharedFrame(f"nb_ann_{cam.id}", create=True)
-            logger.info(f"📡 Shared memory slot created for camera {cam.id}")
-        except Exception as e:
-            logger.warning(f"Shared memory error cam {cam.id}: {e}")
-
-    # Patch set_annotated_frame to also write to shared memory
-    # This runs every time pipeline produces an annotated frame
+    # Patch set_annotated_frame to write JPEG to /dev/shm for uvicorn to read
+    # Uses RAM disk (/dev/shm) — same speed as shared memory, zero IPC risk
+    import cv2 as _cv2
     _orig_set = stream_manager.__class__.set_annotated_frame
 
     def _patched_set(self, camera_id: int, frame):
         _orig_set(self, camera_id, frame)
-        slot = shm_slots.get(camera_id)
-        if slot is not None and frame is not None:
+        if frame is not None:
             try:
-                slot.write(frame)
+                path = f"/dev/shm/neobit_ann_{camera_id}.jpg"
+                ret, buf = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ret:
+                    tmp = path + ".tmp"
+                    with open(tmp, "wb") as f:
+                        f.write(buf.tobytes())
+                    import os as _os
+                    _os.replace(tmp, path)  # atomic rename — no torn reads
             except Exception:
                 pass
 
     stream_manager.__class__.set_annotated_frame = _patched_set
-    logger.info("🔗 Annotated frame bridge: worker → uvicorn via shared memory")
+    logger.info("🔗 Annotated frame bridge: worker → uvicorn via /dev/shm JPEG")
+
 
     logger.info(f"✅ Analytics worker running — {len(cameras)} cameras")
 
