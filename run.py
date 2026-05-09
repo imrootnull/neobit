@@ -2,40 +2,39 @@
 """
 NeoBit Gateway — Entry point
 
-Architecture: Two separate OS processes to avoid GIL contention.
-
-  Process 1 (main): uvicorn HTTP server + stream reader threads
-  Process 2 (inference): YOLO/InsightFace/CLIP in isolated process
-
-The inference process communicates back via shared memory (mmap)
-for annotated frames and a multiprocessing Queue for events.
-
-SIMPLIFIED VERSION: runs uvicorn with --workers 1, but moves all
-blocking torch/YOLO calls to ProcessPoolExecutor so they never
-hold the GIL in the uvicorn process.
+Uses uvicorn with uvloop. Inference runs in background daemon threads.
+Thread limits are set aggressively to prevent GIL starvation of uvicorn.
 """
 import os
 import sys
-import multiprocessing as mp
 
-# ── Critical: set torch thread limits BEFORE any torch import ────────────────
-os.environ["OMP_NUM_THREADS"] = "2"
-os.environ["MKL_NUM_THREADS"] = "2"
-os.environ["OPENBLAS_NUM_THREADS"] = "2"
-os.environ["NUMEXPR_NUM_THREADS"] = "2"
+# Must be set BEFORE any C extension import (torch, cv2, numpy)
+os.environ["OMP_NUM_THREADS"]      = "1"
+os.environ["MKL_NUM_THREADS"]      = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"]  = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-import torch
-torch.set_num_threads(2)
-torch.set_num_interop_threads(1)
+# Also tell torch directly — belt and suspenders
+try:
+    import torch
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+except ImportError:
+    pass
 
-import cv2
-cv2.setNumThreads(2)
+try:
+    import cv2
+    cv2.setNumThreads(1)
+except ImportError:
+    pass
 
+import uvicorn
+from backend.config.settings import settings
 
-def run_server():
-    """Run uvicorn HTTP server in the main process."""
-    import uvicorn
-    from backend.config.settings import settings
+if __name__ == "__main__":
+    print(f"[NeoBit] HTTP server starting on {settings.api_host}:{settings.api_port}")
     uvicorn.run(
         "backend.main:app",
         host      = settings.api_host,
@@ -45,12 +44,4 @@ def run_server():
         loop      = "uvloop",
         http      = "h11",
         timeout_keep_alive = 5,
-        workers   = 1,
     )
-
-
-if __name__ == "__main__":
-    mp.set_start_method("fork", force=True)
-    print(f"[NeoBit] Starting — torch threads: {torch.get_num_threads()} "
-          f"cv2 threads: {cv2.getNumThreads()}")
-    run_server()
