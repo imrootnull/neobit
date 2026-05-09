@@ -33,7 +33,7 @@ class RecordingConfig:
     max_disk_gb:      float   = 50.0          # Maximum disk usage in GB
     segment_minutes:  int     = 5             # Length of each video segment
     pre_buffer_s:     int     = 10            # Seconds before event to include
-    post_buffer_s:    int     = 20            # Seconds after last event to keep recording
+    post_buffer_s:    int     = 5             # Seconds after last event to keep recording
     video_fps:        float   = 10.0          # FPS of saved recordings
     video_quality:    str     = "medium"      # "low" | "medium" | "high"
     retain_days:      int     = 30            # Delete recordings older than N days
