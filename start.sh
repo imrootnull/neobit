@@ -30,11 +30,12 @@ echo ""
 
 # ── 3. Levantar HTTP server (sin inferencia) ──────────────────────
 export NEOBIT_NO_INFERENCE=1
+export HSA_OVERRIDE_GFX_VERSION=12.0.0   # ROCm: gfx1200 (RX 9060 XT / RDNA 4)
 python3 run.py &
 HTTP_PID=$!
 echo "  [PID ${HTTP_PID}] HTTP server"
 
-# ── 4. Levantar analytics worker (inferencia separada) ────────────
+# ── 4. Levantar analytics worker (inferencia en GPU) ──────────────
 sleep 2   # espera que uvicorn levante primero
 python3 worker.py &
 WORKER_PID=$!

@@ -10,15 +10,24 @@ Usage: python3 worker.py   (run alongside python3 run.py)
 """
 import os, asyncio, time
 
-os.environ["OMP_NUM_THREADS"]        = "4"
-os.environ["MKL_NUM_THREADS"]        = "4"
-os.environ["OPENBLAS_NUM_THREADS"]   = "4"
-os.environ["NUMEXPR_NUM_THREADS"]    = "4"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# ROCm: gfx1200 (RDNA 4 / RX 9060 XT) requires this override so ROCm
+# uses the correct kernel ISA. Without it torch.cuda.is_available() = False.
+os.environ["HSA_OVERRIDE_GFX_VERSION"] = "12.0.0"
+os.environ["OMP_NUM_THREADS"]          = "4"
+os.environ["MKL_NUM_THREADS"]          = "4"
+os.environ["OPENBLAS_NUM_THREADS"]     = "4"
+os.environ["NUMEXPR_NUM_THREADS"]      = "4"
+os.environ["TOKENIZERS_PARALLELISM"]   = "false"
 
 import torch, cv2
 torch.set_num_threads(4)
 cv2.setNumThreads(2)
+
+# Confirm GPU
+if torch.cuda.is_available():
+    print(f"[worker] GPU: {torch.cuda.get_device_name(0)} ✅")
+else:
+    print("[worker] GPU not available — running on CPU")
 
 from loguru import logger
 

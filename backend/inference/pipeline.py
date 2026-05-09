@@ -200,11 +200,8 @@ class AnalyticsWorker:
         """
         logger.info(f"Analytics worker loop running — camera {self.camera_id}")
 
-        # Target inference rate: 2fps.
-        # At 2fps, the inference thread sleeps ~480ms out of every 500ms,
-        # keeping the GIL free for uvicorn to serve HTTP requests.
-        # Events like person detection, falls, etc. still trigger reliably at 2fps.
-        TARGET_INTERVAL = 0.50  # 500ms = 2fps
+        # GPU inference: 10fps — GPU handles YOLO in ~15-30ms vs ~500ms on CPU
+        TARGET_INTERVAL = 0.10  # 100ms = 10fps
 
         while self.running:
             enabled = self._enabled_analytics()
