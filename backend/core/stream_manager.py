@@ -26,7 +26,7 @@ class CameraStream:
     name:         str
     frame_skip:   int   = 3
     max_width:    int   = 0       # 0 = no downscale; else resize to this width
-    target_fps:   float = 0.0     # 0 = no throttle; else limit to this FPS
+    target_fps:   float = 10.0    # cap at 10fps — matches inference rate
     max_buffer:   int   = 30      # Ring buffer size
 
     # Runtime state
@@ -64,7 +64,7 @@ class StreamManager:
     def add_camera(self, camera_id: int, rtsp_url: str, name: str = "",
                    frame_skip: int = 3,
                    max_width: int = 0,
-                   target_fps: float = 0.0) -> bool:
+                   target_fps: float = 10.0) -> bool:
         """Add and start a camera stream."""
         with self._lock:
             if len(self.streams) >= self.MAX_CAMERAS:
