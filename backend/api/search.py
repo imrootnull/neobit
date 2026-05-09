@@ -33,8 +33,13 @@ async def semantic_search(req: SearchRequest):
     Auto-translates ES→EN, normalizes scores, fuses analytic events.
     Results include event_clip path for direct playback.
     """
+    import asyncio
     try:
         from backend.semantic.search_engine import search_engine, _translate_to_english
+        # Load CLIP model in thread pool on first call (5-10s, CPU mode in uvicorn)
+        if not search_engine._ready:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, search_engine._load)
         results = await search_engine.search(
             query          = req.query,
             top_k          = req.top_k,
@@ -53,6 +58,7 @@ async def semantic_search(req: SearchRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Search engine unavailable: {str(e)}")
+
 
 
 @router.get("/frame/{frame_path:path}")

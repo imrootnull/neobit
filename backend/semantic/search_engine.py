@@ -73,10 +73,22 @@ class SearchEngine:
             return
         import clip, chromadb
         from backend.config.settings import settings
-        from backend.utils.hardware import get_device
 
         logger.info("Loading CLIP model...")
-        self._device = get_device()
+        # Use GPU if available (worker process), otherwise CPU (uvicorn process)
+        try:
+            from backend.utils.hardware import get_device
+            self._device = get_device()
+        except Exception:
+            self._device = "cpu"
+        # Ensure torch doesn't crash if CUDA unavailable in this process
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                self._device = "cpu"
+        except Exception:
+            self._device = "cpu"
+
         self._model, self._preprocess = clip.load(settings.clip_model, device=self._device)
         self._model.eval()
 
