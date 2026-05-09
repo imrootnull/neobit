@@ -94,8 +94,22 @@ async def main():
     stream_manager.__class__.set_annotated_frame = _patched_set
     logger.info("🔗 Annotated frame bridge: worker → uvicorn via /dev/shm JPEG")
 
+    # Register cameras with stream_manager and inference pipeline
+    for cam in cameras:
+        stream_manager.add_camera(
+            cam.id, cam.rtsp_url, cam.name, cam.frame_skip,
+            max_width=cam.resolution_w or 0,
+            target_fps=cam.fps or 10.0,
+        )
+        cfg = cam.analytics_config or {}
+        if cfg:
+            inference_pipeline.add_camera(cam.id, cfg)
+        recording_manager.add_camera(
+            cam.id, lambda cid=cam.id: stream_manager.get_annotated_frame(cid)
+        )
 
     logger.info(f"✅ Analytics worker running — {len(cameras)} cameras")
+
 
     # CLIP indexer (uvicorn skips it in HTTP-only mode)
     from backend.semantic.search_engine import clip_indexer
