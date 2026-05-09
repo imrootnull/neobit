@@ -200,31 +200,33 @@ class AnalyticsWorker:
         """
         logger.info(f"Analytics worker loop running — camera {self.camera_id}")
 
+        # Target inference rate for AI analytics: 10 fps is sufficient for
+        # real-time detection and leaves CPU headroom for the HTTP server.
+        TARGET_INTERVAL = 0.10  # 100ms = 10fps max
+
         while self.running:
             enabled = self._enabled_analytics()
             if not enabled:
                 time.sleep(2)
                 continue
 
+            t0 = time.monotonic()
+
             # Try to get a real frame
             frame = stream_manager.get_latest_frame(self.camera_id)
 
             if frame is not None:
-                # PRODUCTION: process real frame
-                # Track time so we know our actual inference rate
-                t0 = time.monotonic()
                 self._process_frame(frame, enabled)
-                elapsed = time.monotonic() - t0
-
-                # Yield CPU if inference was very fast (< 20ms).
-                # This prevents burning 100% CPU when the reader thread
-                # is faster than inference. Natural rate: ~15-30 fps on CPU.
-                if elapsed < 0.020:
-                    time.sleep(0.020 - elapsed)
             else:
-                # DEVELOPMENT SIMULATOR: no camera connected
+                # No camera — use simulator
                 self._simulate_events(enabled)
-                time.sleep(2.0)  # check every 2s
+                time.sleep(2.0)
+                continue
+
+            # Always sleep to maintain target rate and yield CPU
+            elapsed = time.monotonic() - t0
+            sleep_s = max(TARGET_INTERVAL - elapsed, 0.005)
+            time.sleep(sleep_s)
 
 
     def _process_frame(self, frame, enabled: dict[str, dict]):

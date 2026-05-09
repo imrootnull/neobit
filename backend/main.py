@@ -34,49 +34,16 @@ from backend.core.recording_manager import recording_manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    # ── Startup ──────────────────────────────────────────────────────────────
     logger.info("🚀 NeoBit Gateway starting...")
     os.makedirs("logs", exist_ok=True)
     os.makedirs(settings.recordings_dir, exist_ok=True)
     os.makedirs(settings.chroma_persist_dir, exist_ok=True)
 
-    # Initialize DB
+    # Initialize DB (fast — must be done before serving)
     await init_db()
     logger.info("✅ Database initialized")
 
-    # Detect hardware
-    hw = get_system_info()
-    logger.info(f"🖥️  Hardware: {hw.get('processor', 'unknown')} | "
-                f"RAM: {hw.get('ram_total_gb', '?')}GB | "
-                f"Coral: {hw.get('coral')} | CUDA: {hw.get('cuda')}")
-
-    # Restore cameras from DB and start streams + analytics
-    from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy import select
-    from backend.storage.database import AsyncSessionLocal
-    loop = asyncio.get_event_loop()
-    inference_pipeline.init(event_bus, loop)
-
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Camera).where(Camera.enabled == True))
-        cameras = result.scalars().all()
-        for cam in cameras:
-            stream_manager.add_camera(
-                cam.id, cam.rtsp_url, cam.name, cam.frame_skip,
-                max_width=cam.resolution_w or 0,
-                target_fps=cam.fps or 0.0,
-            )
-            cfg = cam.analytics_config or {}
-            if cfg:
-                inference_pipeline.add_camera(cam.id, cfg)
-            # Register for recording
-            recording_manager.add_camera(
-                cam.id,
-                lambda cid=cam.id: stream_manager.get_annotated_frame(cid)
-            )
-        logger.info(f"Restored {len(cameras)} cameras from database")
-
-    # Register event DB writer + recording trigger
+    # Register event DB writer
     async def _write_event_to_db(event):
         from backend.storage.database import AsyncSessionLocal, Event
         try:
@@ -94,21 +61,55 @@ async def lifespan(app: FastAPI):
                 )
                 db.add(ev)
                 await db.commit()
-                # Trigger motion recording
                 recording_manager.trigger(event.camera_id)
         except Exception as e:
             logger.error(f"DB event write error: {e}")
 
     event_bus.subscribe(_write_event_to_db)
-
-    # Start event bus
     bus_task = asyncio.create_task(event_bus.start())
-    logger.info("📡 Event bus running")
 
-    # Start CLIP indexer (semantic search)
+    # ── Defer heavy startup to background task ────────────────────────────────
+    # Uvicorn starts serving requests immediately after `yield`.
+    # Camera/YOLO/CLIP init happens in the background so the dashboard
+    # loads instantly — cameras appear within a few seconds.
+    async def _delayed_startup():
+        await asyncio.sleep(1)   # let uvicorn fully bind and serve first
+        try:
+            from sqlalchemy import select
+            from backend.storage.database import AsyncSessionLocal
+            loop = asyncio.get_event_loop()
+
+            # Hardware info (may do I/O)
+            hw = get_system_info()
+            logger.info(f"🖥️  {hw.get('processor','?')} | RAM {hw.get('ram_total_gb','?')}GB")
+
+            inference_pipeline.init(event_bus, loop)
+
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(Camera).where(Camera.enabled == True))
+                cameras = result.scalars().all()
+                for cam in cameras:
+                    stream_manager.add_camera(
+                        cam.id, cam.rtsp_url, cam.name, cam.frame_skip,
+                        max_width=cam.resolution_w or 0,
+                        target_fps=cam.fps or 0.0,
+                    )
+                    cfg = cam.analytics_config or {}
+                    if cfg:
+                        inference_pipeline.add_camera(cam.id, cfg)
+                    recording_manager.add_camera(
+                        cam.id,
+                        lambda cid=cam.id: stream_manager.get_annotated_frame(cid)
+                    )
+                logger.info(f"✅ Restored {len(cameras)} cameras")
+        except Exception as e:
+            logger.error(f"Startup error: {e}")
+
+    startup_task = asyncio.create_task(_delayed_startup())
+
+    # Start CLIP indexer (already has 20s internal delay)
     from backend.semantic.search_engine import clip_indexer
     clip_task = asyncio.create_task(clip_indexer.start())
-    logger.info("🔍 CLIP indexer running")
 
     logger.info(f"✅ NeoBit Gateway ready — http://{settings.api_host}:{settings.api_port}")
 
@@ -120,9 +121,11 @@ async def lifespan(app: FastAPI):
     clip_indexer.stop()
     inference_pipeline.stop_all()
     stream_manager.stop_all()
+    startup_task.cancel()
     bus_task.cancel()
     clip_task.cancel()
     logger.info("Goodbye")
+
 
 
 # ─── App ──────────────────────────────────────────────────────────────────────
