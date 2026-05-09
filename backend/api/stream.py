@@ -1,11 +1,19 @@
 """
-MJPEG Stream proxy endpoint — serves live camera frames as MJPEG
-for browser-compatible video display without WebRTC complexity.
+MJPEG Stream — serves AI-annotated frames at inference rate.
 
-Also serves individual snapshots per camera.
+Design:
+  - mjpeg_generator() yields ONLY annotated frames (with bbox overlays).
+  - Rate is naturally governed by how fast the inference pipeline
+    produces annotated frames — typically 10-15 fps on CPU.
+  - No fixed sleep: uses change-detection on the frame object id so
+    the browser always gets the very latest annotated frame without
+    waiting a fixed interval.
+  - If no new annotated frame is ready within MAX_WAIT, a low-quality
+    placeholder is sent to keep the connection alive.
 """
 import cv2
 import asyncio
+import time
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse, Response
 from backend.core.stream_manager import stream_manager
@@ -13,19 +21,33 @@ from loguru import logger
 
 router = APIRouter(prefix="/api/stream", tags=["Streams"])
 
+# Maximum time to wait for a new annotated frame before re-sending last one
+_MAX_WAIT    = 0.5    # seconds — keeps connection alive even if pipeline stalls
+_POLL_SLEEP  = 0.008  # 8ms polling loop — CPU-light, sub-frame latency
 
-def encode_frame_jpeg(frame, quality: int = 75) -> bytes:
-    """Encode OpenCV frame to JPEG bytes."""
+# JPEG quality: lower = smaller packets = lower latency on LAN
+_JPEG_QUALITY = 70
+
+
+def _encode(frame, quality: int = _JPEG_QUALITY) -> bytes:
     ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ret:
-        raise RuntimeError("Frame encoding failed")
+        raise RuntimeError("JPEG encode failed")
     return buf.tobytes()
 
 
-async def mjpeg_generator(camera_id: int):
-    """Async generator yielding MJPEG frames — annotated (bbox) when inference is active."""
-    boundary  = b"--frame"
-    last_hash = None
+async def mjpeg_generator(camera_id: int, quality: int = _JPEG_QUALITY):
+    """
+    Yield MJPEG frames at inference rate.
+
+    Waits for a new annotated frame (produced by the AI pipeline).
+    Sends immediately when ready → zero artificial delay.
+    Falls back to last frame if pipeline stalls.
+    """
+    boundary = b"--frame"
+    last_id  = None
+    last_sent = 0.0
+    last_jpeg: bytes | None = None
 
     while True:
         frame = stream_manager.get_annotated_frame(camera_id)
@@ -34,32 +56,45 @@ async def mjpeg_generator(camera_id: int):
             await asyncio.sleep(0.05)
             continue
 
-        # Simple identity check (avoid sending same frame twice)
         frame_id = id(frame)
-        if frame_id == last_hash:
-            await asyncio.sleep(0.033)
+        now = time.monotonic()
+
+        if frame_id != last_id:
+            # New annotated frame ready — encode and send immediately
+            try:
+                last_jpeg = _encode(frame, quality)
+                last_id   = frame_id
+                last_sent = now
+            except Exception as e:
+                logger.warning(f"Encode error cam {camera_id}: {e}")
+                await asyncio.sleep(0.05)
+                continue
+
+        elif now - last_sent < _MAX_WAIT:
+            # Same frame, still within wait window — poll again
+            await asyncio.sleep(_POLL_SLEEP)
             continue
-        last_hash = frame_id
 
-        try:
-            jpeg = encode_frame_jpeg(frame)
-            yield (
-                boundary + b"\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n"
-                b"\r\n" + jpeg + b"\r\n"
-            )
-        except Exception as e:
-            logger.warning(f"Frame encode error cam {camera_id}: {e}")
+        # else: same frame but timeout reached → re-send to keep connection alive
 
-        await asyncio.sleep(0.033)  # ~30 fps target
+        if last_jpeg is None:
+            await asyncio.sleep(_POLL_SLEEP)
+            continue
+
+        yield (
+            boundary + b"\r\n"
+            b"Content-Type: image/jpeg\r\n"
+            b"Content-Length: " + str(len(last_jpeg)).encode() + b"\r\n"
+            b"\r\n" + last_jpeg + b"\r\n"
+        )
+        last_sent = now
+        await asyncio.sleep(_POLL_SLEEP)
 
 
 @router.get("/{camera_id}/mjpeg")
-async def stream_mjpeg(camera_id: int, quality: int = 75):
+async def stream_mjpeg(camera_id: int, quality: int = _JPEG_QUALITY):
     """
-    MJPEG live stream for a camera.
-    Compatible with any browser <img> tag or VMS that supports MJPEG.
+    MJPEG live stream — annotated at AI inference rate (no artificial lag).
     Usage: <img src="/api/stream/{id}/mjpeg" />
     """
     status = stream_manager.get_status(camera_id)
@@ -67,34 +102,27 @@ async def stream_mjpeg(camera_id: int, quality: int = 75):
         raise HTTPException(status_code=503, detail=f"Camera {camera_id} not connected")
 
     return StreamingResponse(
-        mjpeg_generator(camera_id),
+        mjpeg_generator(camera_id, quality),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
-            "Cache-Control": "no-cache",
-            "X-Camera-Id": str(camera_id),
+            "Cache-Control":     "no-cache, no-store",
+            "X-Camera-Id":       str(camera_id),
+            "X-Accel-Buffering": "no",   # disable Nginx buffering if behind proxy
         },
     )
 
 
 @router.get("/{camera_id}/snapshot")
 async def get_snapshot(camera_id: int, quality: int = 85):
-    """
-    Get a single JPEG snapshot from a camera.
-    Useful for thumbnails, event snapshots, and VMS integration.
-    """
-    frame = stream_manager.get_latest_frame(camera_id)
+    """Single JPEG snapshot (latest annotated frame)."""
+    frame = stream_manager.get_annotated_frame(camera_id)
     if frame is None:
-        raise HTTPException(status_code=503, detail=f"No frame available for camera {camera_id}")
-
+        raise HTTPException(status_code=503, detail=f"No frame for camera {camera_id}")
     try:
-        jpeg = encode_frame_jpeg(frame, quality=quality)
+        jpeg = _encode(frame, quality)
         return Response(
-            content=jpeg,
-            media_type="image/jpeg",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Camera-Id": str(camera_id),
-            },
+            content=jpeg, media_type="image/jpeg",
+            headers={"Cache-Control": "no-cache", "X-Camera-Id": str(camera_id)},
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -102,5 +130,4 @@ async def get_snapshot(camera_id: int, quality: int = 85):
 
 @router.get("/status")
 async def all_stream_status():
-    """Get connection status for all registered streams."""
     return stream_manager.get_all_status()

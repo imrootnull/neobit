@@ -211,13 +211,21 @@ class AnalyticsWorker:
 
             if frame is not None:
                 # PRODUCTION: process real frame
+                # Track time so we know our actual inference rate
+                t0 = time.monotonic()
                 self._process_frame(frame, enabled)
-                # No fixed sleep — let inference time be the natural rate limiter.
-                # yolov8n ~30ms = natural ~25 FPS cap on CPU
+                elapsed = time.monotonic() - t0
+
+                # Yield CPU if inference was very fast (< 20ms).
+                # This prevents burning 100% CPU when the reader thread
+                # is faster than inference. Natural rate: ~15-30 fps on CPU.
+                if elapsed < 0.020:
+                    time.sleep(0.020 - elapsed)
             else:
                 # DEVELOPMENT SIMULATOR: no camera connected
                 self._simulate_events(enabled)
                 time.sleep(2.0)  # check every 2s
+
 
     def _process_frame(self, frame, enabled: dict[str, dict]):
         """Run YOLO + Fall + Face + EPP detection on a real frame."""
