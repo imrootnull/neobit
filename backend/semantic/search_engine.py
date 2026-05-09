@@ -378,7 +378,11 @@ class CLIPIndexer:
 
         self._running = True
         interval = settings.clip_sample_interval
-        logger.info(f"🎞️  CLIP Indexer started (sample every {interval}s)")
+        logger.info(f"🎞️  CLIP Indexer started (sample every {interval}s) — first index in 20s")
+
+        # Defer first load: let the server fully start before loading CLIP
+        # (avoids blocking the asyncio event loop during startup)
+        await asyncio.sleep(20)
 
         while self._running:
             await asyncio.sleep(interval)
