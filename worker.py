@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-NeoBit Analytics Worker — runs YOLO/InsightFace/PPE in an isolated process.
+NeoBit Analytics Worker — YOLO/InsightFace/PPE en proceso separado (GPU).
 
-Separated from uvicorn so inference never holds the HTTP server's GIL.
-Reads frames from stream_manager (shares RTSP connections with main process
-via the same SQLite-backed camera registry).
-
-Usage: python3 worker.py   (run alongside python3 run.py)
+Comparte frames anotados con uvicorn via shared memory (frame_bridge).
+El snapshot endpoint de uvicorn lee los frames anotados desde shared memory,
+mostrando los overlays de detección en tiempo real.
 """
 import os, asyncio, time
 
-# ROCm: gfx1200 (RDNA 4 / RX 9060 XT) requires this override so ROCm
-# uses the correct kernel ISA. Without it torch.cuda.is_available() = False.
-os.environ["HSA_OVERRIDE_GFX_VERSION"] = "12.0.0"
+os.environ["HSA_OVERRIDE_GFX_VERSION"] = "12.0.0"   # RDNA 4 gfx1200
 os.environ["OMP_NUM_THREADS"]          = "4"
 os.environ["MKL_NUM_THREADS"]          = "4"
 os.environ["OPENBLAS_NUM_THREADS"]     = "4"
@@ -23,7 +19,6 @@ import torch, cv2
 torch.set_num_threads(4)
 cv2.setNumThreads(2)
 
-# Confirm GPU
 if torch.cuda.is_available():
     print(f"[worker] GPU: {torch.cuda.get_device_name(0)} ✅")
 else:
@@ -33,11 +28,12 @@ from loguru import logger
 
 
 async def main():
-    from backend.storage.database import init_db, Camera, AsyncSessionLocal, Event as EvModel
+    from backend.storage.database import init_db, Camera, AsyncSessionLocal, Event
     from backend.core.stream_manager import stream_manager
     from backend.core.event_bus import event_bus
     from backend.inference.pipeline import inference_pipeline
     from backend.core.recording_manager import recording_manager
+    from backend.core.frame_bridge import SharedFrame
     from sqlalchemy import select
 
     await init_db()
@@ -48,7 +44,6 @@ async def main():
     async def _write_event(ev):
         try:
             async with AsyncSessionLocal() as db:
-                from backend.storage.database import Event
                 row = Event(
                     camera_id=ev.camera_id,
                     analytic_type=ev.analytic_type,
@@ -73,6 +68,10 @@ async def main():
         result = await db.execute(select(Camera).where(Camera.enabled == True))
         cameras = result.scalars().all()
 
+    # Shared memory slots — one per camera for annotated frames
+    # uvicorn reads from these to serve /snapshot with overlays
+    shm_slots: dict[int, SharedFrame] = {}
+
     for cam in cameras:
         stream_manager.add_camera(
             cam.id, cam.rtsp_url, cam.name, cam.frame_skip,
@@ -85,10 +84,32 @@ async def main():
         recording_manager.add_camera(
             cam.id, lambda cid=cam.id: stream_manager.get_annotated_frame(cid)
         )
+        # Create shared memory slot for this camera
+        try:
+            shm_slots[cam.id] = SharedFrame(f"nb_ann_{cam.id}", create=True)
+            logger.info(f"📡 Shared memory slot created for camera {cam.id}")
+        except Exception as e:
+            logger.warning(f"Shared memory error cam {cam.id}: {e}")
+
+    # Patch set_annotated_frame to also write to shared memory
+    # This runs every time pipeline produces an annotated frame
+    _orig_set = stream_manager.__class__.set_annotated_frame
+
+    def _patched_set(self, camera_id: int, frame):
+        _orig_set(self, camera_id, frame)
+        slot = shm_slots.get(camera_id)
+        if slot is not None and frame is not None:
+            try:
+                slot.write(frame)
+            except Exception:
+                pass
+
+    stream_manager.__class__.set_annotated_frame = _patched_set
+    logger.info("🔗 Annotated frame bridge: worker → uvicorn via shared memory")
 
     logger.info(f"✅ Analytics worker running — {len(cameras)} cameras")
 
-    # Run CLIP indexer here (uvicorn skips it in HTTP-only mode)
+    # CLIP indexer (uvicorn skips it in HTTP-only mode)
     from backend.semantic.search_engine import clip_indexer
     asyncio.create_task(clip_indexer.start())
 

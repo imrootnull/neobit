@@ -22,9 +22,26 @@ router = APIRouter(prefix="/api/stream", tags=["Streams"])
 _encode_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mjpeg-enc")
 
 
-_JPEG_QUALITY = 70     # lower = smaller packets, less latency on LAN
-_POLL_MS      = 0.033  # 33ms = ~30fps max visual rate (matches inference rate)
-_KEEPALIVE_S  = 0.5    # re-send last frame if no new one after 500ms
+_JPEG_QUALITY = 70
+_POLL_MS      = 0.033
+_KEEPALIVE_S  = 0.5
+
+# Cache of SharedFrame slots keyed by camera_id.
+# Populated lazily on first snapshot request; worker.py creates them.
+_shm_cache: dict[int, object] = {}
+
+def _get_shm(camera_id: int):
+    """Return cached SharedFrame for camera, or None if not available."""
+    if camera_id in _shm_cache:
+        return _shm_cache[camera_id]
+    try:
+        from backend.core.frame_bridge import SharedFrame
+        slot = SharedFrame(f"nb_ann_{camera_id}", create=False)
+        _shm_cache[camera_id] = slot
+        return slot
+    except Exception:
+        _shm_cache[camera_id] = None
+        return None
 
 
 def _encode_sync(frame, quality: int) -> bytes:
@@ -103,10 +120,29 @@ async def stream_mjpeg(camera_id: int, quality: int = _JPEG_QUALITY):
 
 @router.get("/{camera_id}/snapshot")
 async def get_snapshot(camera_id: int, quality: int = 85):
-    """Single JPEG snapshot (latest annotated frame)."""
-    frame = stream_manager.get_annotated_frame(camera_id)
+    """
+    Single JPEG snapshot — reads annotated frame from shared memory
+    (written by worker.py with YOLO overlays). Falls back to local
+    stream_manager frame if shared memory not yet populated.
+    """
+    frame = None
+
+    # Try shared memory first (annotated frame with YOLO overlays from worker)
+    frame = None
+    slot = _get_shm(camera_id)
+    if slot is not None:
+        frame, fid = slot.read()
+        if fid == 0:
+            frame = None
+
+    # Fallback: raw frame from local stream_manager
+    if frame is None:
+        frame = stream_manager.get_annotated_frame(camera_id)
+
+
     if frame is None:
         raise HTTPException(status_code=503, detail=f"No frame for camera {camera_id}")
+
     loop = asyncio.get_event_loop()
     try:
         jpeg = await loop.run_in_executor(_encode_pool, _encode_sync, frame, quality)
@@ -114,6 +150,7 @@ async def get_snapshot(camera_id: int, quality: int = 85):
                         headers={"Cache-Control": "no-cache"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @router.get("/status")
