@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-NeoBit Gateway — Entry point
+NeoBit Gateway — HTTP server entry point (no inference).
+Analytics run in worker.py (separate process, separate GIL).
 """
-import os, sys
+import os
 
 os.environ["OMP_NUM_THREADS"]        = "1"
 os.environ["MKL_NUM_THREADS"]        = "1"
 os.environ["OPENBLAS_NUM_THREADS"]   = "1"
 os.environ["NUMEXPR_NUM_THREADS"]    = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["NEOBIT_NO_INFERENCE"]    = "1"   # always set here
 
 try:
     import torch
@@ -27,21 +29,13 @@ import uvicorn
 from backend.config.settings import settings
 
 if __name__ == "__main__":
-    # workers=1: the inference thread holds the GIL which starves uvicorn.
-    # Solution: run the inference pipeline in a separate process (neobit-worker)
-    # and keep uvicorn single-worker but preloaded.
-    # 
-    # The start.sh script launches:
-    #   python3 run.py          ← uvicorn (HTTP only, no analytics)
-    #   python3 worker.py       ← analytics worker (YOLO, no HTTP)
-    # For now: single worker with OMP=1 and 2fps inference gives acceptable UX.
     uvicorn.run(
         "backend.main:app",
-        host=settings.api_host,
-        port=settings.api_port,
-        reload=False,
-        log_level=settings.log_level.lower(),
-        loop="uvloop",
-        http="h11",
-        timeout_keep_alive=5,
+        host             = settings.api_host,
+        port             = settings.api_port,
+        reload           = False,
+        log_level        = settings.log_level.lower(),
+        loop             = "uvloop",
+        http             = "h11",
+        timeout_keep_alive = 5,
     )

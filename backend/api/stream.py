@@ -19,7 +19,8 @@ from loguru import logger
 router = APIRouter(prefix="/api/stream", tags=["Streams"])
 
 # Shared thread pool for JPEG encoding (CPU-bound but very fast ~1ms)
-_encode_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mjpeg-enc")
+_encode_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mjpeg-enc")
+
 
 _JPEG_QUALITY = 70     # lower = smaller packets, less latency on LAN
 _POLL_MS      = 0.033  # 33ms = ~30fps max visual rate (matches inference rate)

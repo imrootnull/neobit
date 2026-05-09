@@ -79,6 +79,10 @@ async def main():
 
     logger.info(f"✅ Analytics worker running — {len(cameras)} cameras")
 
+    # Run CLIP indexer here (uvicorn skips it in HTTP-only mode)
+    from backend.semantic.search_engine import clip_indexer
+    asyncio.create_task(clip_indexer.start())
+
     # Keep alive
     while True:
         await asyncio.sleep(10)

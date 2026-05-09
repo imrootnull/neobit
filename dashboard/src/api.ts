@@ -1,5 +1,6 @@
 // Global API base URL — reads from env or defaults to relative (works local AND cloud)
 export const API_BASE: string = import.meta.env.VITE_API_URL || '';
+export const POLL_INTERVAL = 200; // ms — ~5fps display, safe for single uvicorn worker
 
 // ─── Domain Types ─────────────────────────────────────────────────────────────
 
@@ -219,5 +220,5 @@ export function getMjpegUrl(cameraId: number): string {
 }
 
 export function getSnapshotUrl(cameraId: number): string {
-  return `${API_BASE}/api/stream/${cameraId}/snapshot?t=${Date.now()}`;
+  return `${API_BASE}/api/stream/${cameraId}/snapshot`;
 }

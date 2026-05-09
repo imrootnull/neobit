@@ -113,9 +113,14 @@ async def lifespan(app: FastAPI):
 
     startup_task = asyncio.create_task(_delayed_startup())
 
-    # Start CLIP indexer (already has 20s internal delay)
+    # CLIP indexer — only in full mode (worker.py handles it in HTTP-only mode)
+    no_inference = os.environ.get("NEOBIT_NO_INFERENCE", "0") == "1"
     from backend.semantic.search_engine import clip_indexer
-    clip_task = asyncio.create_task(clip_indexer.start())
+    if not no_inference:
+        clip_task = asyncio.create_task(clip_indexer.start())
+    else:
+        clip_task = asyncio.create_task(asyncio.sleep(0))  # dummy task
+        logger.info("🔍 CLIP indexer skipped (HTTP-only mode)")
 
     logger.info(f"✅ NeoBit Gateway ready — http://{settings.api_host}:{settings.api_port}")
 
