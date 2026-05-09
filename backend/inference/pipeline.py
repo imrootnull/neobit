@@ -869,6 +869,17 @@ class InferencePipeline:
             for cid, w in self._workers.items()
         ]
 
+    def get_camera_state(self, camera_id: int) -> dict | None:
+        """
+        Return latest detection state for a camera — used by CLIP indexer
+        to enrich frame metadata with what was detected.
+        """
+        worker = self._workers.get(camera_id)
+        if not worker:
+            return None
+        return getattr(worker, "_last_detection_state", None)
+
+
     def refresh_face_gallery(self):
         """Rebuild InsightFace embedding gallery in all running workers."""
         refreshed = 0
